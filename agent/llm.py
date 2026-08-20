@@ -91,6 +91,27 @@ class BaseLLM(ABC):
     def embed(self, text: str) -> List[float]:
         """Return an embedding vector for ``text`` (used by long-term memory)."""
 
+    async def astream(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ):
+        """Async generator that yields SSE-style dicts during a chat completion.
+
+        Each yield is a dict with ``type`` and ``data`` keys, suitable for
+        Server-Sent Events in a web server.  Subclasses that support streaming
+        override this; the default falls back to a single-text yield from
+        :meth:`chat`.
+        """
+        response = self.chat(messages, tools)
+        if response.content:
+            yield {"type": "text", "data": response.content}
+        for tc in response.tool_calls:
+            yield {
+                "type": "tool_call",
+                "data": {"id": tc.id, "name": tc.name, "arguments": tc.arguments},
+            }
+
 
 # ---------------------------------------------------------------------------
 # Mock implementation (zero-dependency, deterministic)
@@ -251,6 +272,18 @@ class MockLLM(BaseLLM):
         ):
             return "datetime", {}
 
+        if "memory_search" in tool_names and any(
+            kw in lower
+            for kw in (
+                "memory", "remember", "recall", "past", "previous",
+                "stored", "history", "learned", "know about",
+                "refund", "policy", "cost", "price", "product",
+                "enterprise", "customer", "support", "office",
+                "founded", "headquartered", "ceo",
+            )
+        ):
+            return "memory_search", {"query": text}
+
         if "web_search" in tool_names and any(
             kw in lower
             for kw in ("search", "who", "what is", "capital", "tallest", "speed of")
@@ -289,6 +322,9 @@ class OpenAILLM(BaseLLM):
     """Wraps the OpenAI chat-completions API.
 
     Imported lazily so the repo stays importable without the ``openai`` package.
+
+    Set ``OPENAI_BASE_URL`` to point at any OpenAI-compatible endpoint
+    (DeepSeek, Ollama, vLLM, etc.) without switching class.
     """
 
     def __init__(
@@ -296,6 +332,7 @@ class OpenAILLM(BaseLLM):
         model: str = "gpt-4o-mini",
         temperature: float = 0.0,
         embed_model: str = "text-embedding-3-small",
+        base_url: str | None = None,
     ) -> None:
         try:
             from openai import OpenAI  # type: ignore
@@ -309,7 +346,11 @@ class OpenAILLM(BaseLLM):
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is not set; use MockLLM instead.")
 
-        self._client = OpenAI(api_key=api_key)
+        base_url = base_url or os.environ.get("OPENAI_BASE_URL")
+        client_kwargs: dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self._client = OpenAI(**client_kwargs)
         self.model = model
         self.temperature = temperature
         self.embed_model = embed_model
@@ -350,3 +391,252 @@ class OpenAILLM(BaseLLM):
     def embed(self, text: str) -> List[float]:
         resp = self._client.embeddings.create(model=self.embed_model, input=text)
         return list(resp.data[0].embedding)
+
+
+# ---------------------------------------------------------------------------
+# DeepSeek implementation
+# ---------------------------------------------------------------------------
+class DeepSeekLLM(OpenAILLM):
+    """DeepSeek API client — OpenAI-compatible, preset for DeepSeek models.
+
+    DeepSeek's API is fully compatible with the OpenAI chat-completions protocol,
+    so this is a thin preset over :class:`OpenAILLM`.  Set ``DEEPSEEK_API_KEY``
+    (or ``OPENAI_API_KEY``) in your environment.
+
+    .. code-block:: python
+
+        from agent import DeepSeekLLM, ReActAgent
+
+        llm = DeepSeekLLM()                 # defaults to deepseek-chat (V3)
+        llm = DeepSeekLLM(model="deepseek-reasoner")  # DeepSeek-R1
+        agent = ReActAgent(llm=llm, tools=registry)
+
+    Caveats
+    -------
+    - DeepSeek does **not** offer an embeddings API.  ``embed()`` falls back to
+      the deterministic hash-based embedding used by :class:`MockLLM`, so
+      :class:`~agent.memory.LongTermMemory` works without external services.
+      Swap in a real embedding provider for production.
+    - DeepSeek-R1 (``deepseek-reasoner``) returns ``reasoning_content`` before
+      the final answer; this client merges it into ``content`` so the agent sees
+      the full chain-of-thought.
+    """
+
+    MODELS = {
+        "chat": "deepseek-chat",           # DeepSeek-V3 (fast, general-purpose)
+        "reasoner": "deepseek-reasoner",   # DeepSeek-R1 (reasoning / CoT)
+    }
+
+    def __init__(
+        self,
+        model: str | None = None,
+        temperature: float = 0.0,
+    ) -> None:
+        try:
+            from openai import OpenAI  # type: ignore
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(
+                "The 'openai' package is required for DeepSeekLLM."
+            ) from exc
+
+        api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "Set DEEPSEEK_API_KEY (or OPENAI_API_KEY) environment variable."
+            )
+
+        self._client = OpenAI(
+            api_key=api_key,
+            base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        )
+        self.model = model or self.MODELS["chat"]
+        self.temperature = temperature
+        self.embed_model = ""  # not used — embed() is overridden below
+
+    def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> LLMResponse:
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+
+        resp = self._client.chat.completions.create(**kwargs)
+        choice = resp.choices[0].message
+
+        # DeepSeek-R1 emits reasoning_content before the final answer.
+        # Merge it so the agent retains the chain-of-thought in context.
+        reasoning = getattr(choice, "reasoning_content", None)
+        content = choice.content or ""
+        if reasoning:
+            content = f"[reasoning]\n{reasoning}\n[/reasoning]\n\n{content}"
+
+        tool_calls: List[ToolCall] = []
+        for tc in choice.tool_calls or []:
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            tool_calls.append(
+                ToolCall(id=tc.id, name=tc.function.name, arguments=args)
+            )
+
+        usage = Usage(
+            prompt_tokens=getattr(resp.usage, "prompt_tokens", 0),
+            completion_tokens=getattr(resp.usage, "completion_tokens", 0),
+        )
+        return LLMResponse(content=content, tool_calls=tool_calls, usage=usage)
+
+    async def astream(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ):
+        """Stream tokens from DeepSeek via SSE-compatible async generator."""
+        try:
+            from openai import AsyncOpenAI
+        except ImportError:
+            raise RuntimeError(
+                "The 'openai' package is required for DeepSeekLLM streaming."
+            )
+
+        aclient = AsyncOpenAI(
+            api_key=self._client.api_key,
+            base_url=str(self._client.base_url),
+        )
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "stream": True,
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+
+        stream = await aclient.chat.completions.create(**kwargs)
+
+        # Accumulate tool_call deltas across chunks.
+        tool_call_buf: Dict[int, Dict[str, Any]] = {}
+        async for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta is None:
+                continue
+
+            # Text token.
+            if delta.content:
+                yield {"type": "text", "data": delta.content}
+
+            # Tool-call fragments (DeepSeek streams these as JSON fragments).
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in tool_call_buf:
+                        tool_call_buf[idx] = {"id": tc.id or "", "name": "", "arguments": ""}
+                    if tc.id:
+                        tool_call_buf[idx]["id"] = tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            tool_call_buf[idx]["name"] += tc.function.name
+                        if tc.function.arguments:
+                            tool_call_buf[idx]["arguments"] += tc.function.arguments
+
+            # Emit completed tool calls on the final chunk.
+            if chunk.choices[0].finish_reason == "tool_calls":
+                for idx in sorted(tool_call_buf):
+                    tc = tool_call_buf[idx]
+                    try:
+                        args = json.loads(tc["arguments"])
+                    except json.JSONDecodeError:
+                        args = {}
+                    yield {
+                        "type": "tool_call",
+                        "data": {"id": tc["id"], "name": tc["name"], "arguments": args},
+                    }
+
+    def embed(self, text: str) -> List[float]:
+        """Fallback to deterministic hash-based embedding.
+
+        DeepSeek does not provide an embeddings API.  This uses the same
+        lightweight deterministic method as :class:`MockLLM` so that
+        :class:`~agent.memory.LongTermMemory` stays functional.  Swap in
+        an OpenAI / Voyage / Cohere embedding call for production use.
+        """
+        return MockLLM().embed(text)
+
+
+# ---------------------------------------------------------------------------
+# Bailian (Alibaba Bailian / DashScope) implementation
+# ---------------------------------------------------------------------------
+class BailianLLM(OpenAILLM):
+    """Alibaba Bailian (百炼) API client — OpenAI-compatible, preset for Bailian models.
+
+    百炼's API is fully compatible with the OpenAI chat-completions protocol,
+    so this is a thin preset over :class:`OpenAILLM`.  Set ``BAILIAN_API_KEY``
+    (or ``OPENAI_API_KEY``) in your environment.
+
+    .. code-block:: python
+
+        from agent import BailianLLM, ReActAgent
+
+        llm = BailianLLM()                 # defaults to qwen-plus
+        llm = BailianLLM(model="qwen-max") # use a different model
+        agent = ReActAgent(llm=llm, tools=registry)
+
+    Embeddings
+    ----------
+    Bailian provides an embeddings API via ``text-embedding-v3`` (1024-dim).
+    The ``embed()`` method calls the real API — no fallback needed.
+
+    Env vars
+    --------
+    - ``BAILIAN_API_KEY``: Your Bailian API key (sk-...). Falls back to
+      ``OPENAI_API_KEY``.
+    - ``BAILIAN_BASE_URL``: Override the default base URL. Defaults to
+      ``https://dashscope.aliyuncs.com/compatible-mode/v1``.
+    - ``BAILIAN_EMBED_MODEL``: Override the embedding model. Defaults to
+      ``text-embedding-v3``.
+    """
+
+    MODELS = {
+        "chat": "qwen-plus",
+        "embed": "text-embedding-v3",
+    }
+
+    def __init__(
+        self,
+        model: str | None = None,
+        temperature: float = 0.0,
+        embed_model: str | None = None,
+    ) -> None:
+        try:
+            from openai import OpenAI  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                "The 'openai' package is required for BailianLLM."
+            ) from exc
+
+        api_key = os.environ.get("BAILIAN_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "Set BAILIAN_API_KEY (or OPENAI_API_KEY) environment variable."
+            )
+
+        base_url = os.environ.get(
+            "BAILIAN_BASE_URL",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        )
+        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        self.model = model or self.MODELS["chat"]
+        self.temperature = temperature
+        self.embed_model = (
+            embed_model
+            or os.environ.get("BAILIAN_EMBED_MODEL")
+            or self.MODELS["embed"]
+        )

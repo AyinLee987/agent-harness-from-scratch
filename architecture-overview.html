@@ -1,0 +1,464 @@
+<title>Agent Architecture — Trigger / State Layers</title>
+
+<style>
+  :root {
+    --bg: #ffffff;
+    --surface: #f8f9fa;
+    --text: #1a1a2e;
+    --text-muted: #6b7280;
+    --border: #e5e7eb;
+    --trigger: #3b82f6;
+    --trigger-light: #eff6ff;
+    --trigger-border: #bfdbfe;
+    --state: #10b981;
+    --state-light: #ecfdf5;
+    --state-border: #a7f3d0;
+    --shared: #8b5cf6;
+    --shared-light: #f5f3ff;
+    --shared-border: #ddd6fe;
+    --entry: #f59e0b;
+    --entry-light: #fffbeb;
+    --entry-border: #fde68a;
+    --eval: #ef4444;
+    --eval-light: #fef2f2;
+    --eval-border: #fecaca;
+    --gateway: #ec4899;
+    --gateway-light: #fdf2f8;
+    --gateway-border: #fbcfe8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f172a;
+      --surface: #1e293b;
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --border: #334155;
+      --trigger-light: #1e3a5f;
+      --trigger-border: #1d4ed8;
+      --state-light: #064e3b;
+      --state-border: #059669;
+      --shared-light: #2e1065;
+      --shared-border: #7c3aed;
+      --entry-light: #451a03;
+      --entry-border: #d97706;
+      --eval-light: #450a0a;
+      --eval-border: #dc2626;
+      --gateway-light: #500724;
+      --gateway-border: #db2777;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --text: #e2e8f0;
+    --text-muted: #94a3b8;
+    --border: #334155;
+    --trigger-light: #1e3a5f;
+    --trigger-border: #1d4ed8;
+    --state-light: #064e3b;
+    --state-border: #059669;
+    --shared-light: #2e1065;
+    --shared-border: #7c3aed;
+    --entry-light: #451a03;
+    --entry-border: #d97706;
+    --eval-light: #450a0a;
+    --eval-border: #dc2626;
+    --gateway-light: #500724;
+    --gateway-border: #db2777;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 32px 20px;
+    line-height: 1.6;
+  }
+  .container { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 1.75rem; margin-bottom: 4px; }
+  .subtitle { color: var(--text-muted); margin-bottom: 32px; font-size: 0.95rem; }
+
+  /* Flow chart */
+  .flow {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin-bottom: 40px;
+  }
+  .layer {
+    border: 1.5px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+    background: var(--surface);
+    position: relative;
+  }
+  .layer + .layer { margin-top: -1px; border-top-left-radius: 0; border-top-right-radius: 0; }
+  .layer:has(+ .layer) { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+
+  .layer-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .layer-badge {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 3px 10px;
+    border-radius: 20px;
+  }
+  .badge-entry { background: var(--entry-light); color: var(--entry); border: 1px solid var(--entry-border); }
+  .badge-trigger { background: var(--trigger-light); color: var(--trigger); border: 1px solid var(--trigger-border); }
+  .badge-state { background: var(--state-light); color: var(--state); border: 1px solid var(--state-border); }
+  .badge-shared { background: var(--shared-light); color: var(--shared); border: 1px solid var(--shared-border); }
+  .badge-gateway { background: var(--gateway-light); color: var(--gateway); border: 1px solid var(--gateway-border); }
+  .badge-eval { background: var(--eval-light); color: var(--eval); border: 1px solid var(--eval-border); }
+
+  .layer-title { font-weight: 600; font-size: 1.05rem; }
+
+  /* Module cards */
+  .modules {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 10px;
+  }
+  .module {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    background: var(--bg);
+    font-size: 0.875rem;
+  }
+  .module-name {
+    font-weight: 600;
+    font-family: "JetBrains Mono", "Cascadia Code", monospace;
+    font-size: 0.8rem;
+  }
+  .module-desc {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    margin-top: 2px;
+  }
+
+  /* Data flow arrows */
+  .flow-arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px 0;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    gap: 8px;
+  }
+  .flow-arrow::before, .flow-arrow::after {
+    content: "";
+    display: block;
+    width: 1.5px;
+    height: 18px;
+    background: var(--border);
+  }
+  .flow-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-style: italic;
+  }
+
+  /* Request flow timeline */
+  .timeline {
+    counter-reset: step;
+    margin-top: 32px;
+  }
+  .timeline h2 { font-size: 1.2rem; margin-bottom: 20px; }
+  .timeline-item {
+    display: flex;
+    gap: 16px;
+    padding: 12px 0;
+    border-left: 2px solid var(--border);
+    margin-left: 12px;
+    padding-left: 24px;
+    position: relative;
+  }
+  .timeline-item::before {
+    counter-increment: step;
+    content: counter(step);
+    position: absolute;
+    left: -14px;
+    top: 12px;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: var(--trigger);
+    color: white;
+    font-size: 0.75rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .timeline-item.gateway-step::before { background: var(--gateway); }
+  .timeline-item.state-step::before { background: var(--state); }
+  .timeline-item.llm-step::before { background: var(--shared); }
+  .timeline-item.output-step::before { background: var(--eval); }
+
+  .timeline-content { flex: 1; }
+  .timeline-title { font-weight: 600; font-size: 0.9rem; }
+  .timeline-desc { color: var(--text-muted); font-size: 0.8rem; }
+  .timeline-file { font-family: "JetBrains Mono", monospace; font-size: 0.7rem; color: var(--text-muted); background: var(--surface); padding: 1px 6px; border-radius: 3px; }
+
+  /* Two-column for state + shared */
+  .two-col {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }
+
+  /* Gateway details */
+  .gateway-detail {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-top: 12px;
+  }
+  @media (max-width: 700px) { .gateway-detail { grid-template-columns: 1fr; } }
+  .gateway-comp {
+    border: 1px dashed var(--gateway-border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    background: var(--gateway-light);
+    font-size: 0.78rem;
+  }
+  .gateway-comp strong { display: block; font-size: 0.8rem; margin-bottom: 2px; }
+</style>
+
+<div class="container">
+  <h1>Agent Harness — 全链路架构</h1>
+  <p class="subtitle">触发层（Trigger） / 状态层（State）分离 + 网关入口</p>
+
+  <!-- ARCHITECTURE LAYERS -->
+  <div class="flow">
+
+    <!-- Entry Points -->
+    <div class="layer" style="border-color: var(--entry-border);">
+      <div class="layer-header">
+        <span class="layer-badge badge-entry">外部触发</span>
+        <span class="layer-title">Entry Points</span>
+      </div>
+      <div class="modules">
+        <div class="module">
+          <div class="module-name">server.py</div>
+          <div class="module-desc">FastAPI — REST + SSE Streaming</div>
+        </div>
+        <div class="module">
+          <div class="module-name">CLI</div>
+          <div class="module-desc">命令行直接调用 (examples/)</div>
+        </div>
+        <div class="module">
+          <div class="module-name">Cron / Scheduler</div>
+          <div class="module-desc">定时任务触发 (未来)</div>
+        </div>
+        <div class="module">
+          <div class="module-name">WebSocket</div>
+          <div class="module-desc">实时双向通信 (未来)</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="flow-arrow"><span class="flow-label">▼ request + task ▼</span></div>
+
+    <!-- Trigger Layer - Gateway -->
+    <div class="layer" style="border-color: var(--gateway-border); background: var(--gateway-light);">
+      <div class="layer-header">
+        <span class="layer-badge badge-gateway">触发层 · 网关</span>
+        <span class="layer-title">agent/trigger/gateway.py</span>
+      </div>
+      <div class="gateway-detail">
+        <div class="gateway-comp">
+          <strong>🔒 RateLimiter</strong>
+          滑动窗口 / 令牌桶限流<br>默认: 100 req/s
+        </div>
+        <div class="gateway-comp">
+          <strong>🔀 ConcurrencyGuard</strong>
+          信号量并发控制<br>默认: 10 并发
+        </div>
+        <div class="gateway-comp">
+          <strong>📋 RequestQueue</strong>
+          排队 + 超时拒绝<br>默认: 30s 超时
+        </div>
+      </div>
+      <div style="margin-top:10px;font-size:0.75rem;color:var(--text-muted);">
+        → 通过则进入 ReAct 循环 &nbsp;|&nbsp; 拒绝则返回 429 / 503
+      </div>
+    </div>
+
+    <div class="flow-arrow"><span class="flow-label">▼ passed ▼</span></div>
+
+    <!-- Trigger Layer - Core -->
+    <div class="layer" style="border-color: var(--trigger-border);">
+      <div class="layer-header">
+        <span class="layer-badge badge-trigger">触发层 · 核心</span>
+        <span class="layer-title">agent/trigger/</span>
+      </div>
+      <div class="modules">
+        <div class="module">
+          <div class="module-name">react_loop.py</div>
+          <div class="module-desc">ReAct 循环: think_node → act_node → observe</div>
+        </div>
+        <div class="module">
+          <div class="module-name">graph.py</div>
+          <div class="module-desc">通用 StateGraph 引擎 (不感知 ReAct)</div>
+        </div>
+        <div class="module">
+          <div class="module-name">dispatch.py</div>
+          <div class="module-desc">Tool 分发: 查找 → 执行 → 重试 → 错误恢复</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="flow-arrow"><span class="flow-label">▼ reads / writes ▼</span></div>
+
+    <!-- State Layer -->
+    <div class="layer" style="border-color: var(--state-border);">
+      <div class="layer-header">
+        <span class="layer-badge badge-state">状态层</span>
+        <span class="layer-title">agent/state/</span>
+      </div>
+      <div class="modules">
+        <div class="module">
+          <div class="module-name">context.py</div>
+          <div class="module-desc">ExecutionContext: messages, steps, budget, run_id</div>
+        </div>
+        <div class="module">
+          <div class="module-name">memory.py</div>
+          <div class="module-desc">ShortTerm (window+summary) + LongTerm (vector)</div>
+        </div>
+        <div class="module">
+          <div class="module-name">store.py</div>
+          <div class="module-desc">VectorStore: NumPy / SQLite / (FAISS / Qdrant 未来)</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="flow-arrow"><span class="flow-label">▼ response ▼</span></div>
+
+    <!-- Output -->
+    <div class="layer" style="border-color: var(--eval-border);">
+      <div class="layer-header">
+        <span class="layer-badge badge-eval">输出 & 评估</span>
+        <span class="layer-title">Result + Eval</span>
+      </div>
+      <div class="two-col">
+        <div class="modules">
+          <div class="module">
+            <div class="module-name">AgentResult</div>
+            <div class="module-desc">answer, success, steps, tokens, trajectory</div>
+          </div>
+        </div>
+        <div class="modules">
+          <div class="module">
+            <div class="module-name">eval/harness.py</div>
+            <div class="module-desc">Rule + Trajectory + LLM-as-Judge</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- FULL REQUEST TIMELINE -->
+  <div class="timeline">
+    <h2>一次完整请求的全链路时间线</h2>
+
+    <div class="timeline-item gateway-step">
+      <div class="timeline-content">
+        <div class="timeline-title">网关：限流 & 并发检查</div>
+        <div class="timeline-desc">RateLimiter 检查 QPS → ConcurrencyGuard 获取信号量 → 进入队列或拒绝（429/503）</div>
+        <span class="timeline-file">agent/trigger/gateway.py</span>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-content">
+        <div class="timeline-title">创建 ExecutionContext</div>
+        <div class="timeline-desc">新 run_id + 空消息列表 + 初始 system/user 消息 + budget 初始化</div>
+        <span class="timeline-file">agent/state/context.py</span>
+      </div>
+    </div>
+
+    <div class="timeline-item state-step">
+      <div class="timeline-content">
+        <div class="timeline-title">短期记忆管理 + 长期记忆召回</div>
+        <div class="timeline-desc">ShortTermMemory: 滑动窗口 + 溢出摘要 &nbsp;|&nbsp; LongTermMemory: 向量相似度召回相关知识</div>
+        <span class="timeline-file">agent/state/memory.py</span>
+      </div>
+    </div>
+
+    <div class="timeline-item llm-step">
+      <div class="timeline-content">
+        <div class="timeline-title">可选：上下文压缩</div>
+        <div class="timeline-desc">当 prompt 接近 token 预算时，ContextCompressor 提取式压缩长文本</div>
+        <span class="timeline-file">agent/compression.py (共享基础设施)</span>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-content">
+        <div class="timeline-title">THINK：LLM 调用</div>
+        <div class="timeline-desc">发送 messages + tool schemas → LLM 返回 content 或 tool_calls</div>
+        <span class="timeline-file">agent/llm.py → agent/trigger/react_loop.py : think_node()</span>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-content">
+        <div class="timeline-title">路由决策</div>
+        <div class="timeline-desc">有 tool_calls → ACT 阶段 &nbsp;|&nbsp; 无 tool_calls → 视为最终答案，结束循环</div>
+        <span class="timeline-file">agent/trigger/react_loop.py : _route_by_next()</span>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-content">
+        <div class="timeline-title">ACT：Tool 分发与执行</div>
+        <div class="timeline-desc">查找 tool → 参数校验 → 执行 → 失败重试一次 → 记录 observation</div>
+        <span class="timeline-file">agent/trigger/dispatch.py + agent/tools.py</span>
+      </div>
+    </div>
+
+    <div class="timeline-item state-step">
+      <div class="timeline-content">
+        <div class="timeline-title">安全检查：Tool 输出注入防御</div>
+        <div class="timeline-desc">ToolOutputGuard 扫描 observation → 匹配到注入模式则 redact → 安全内容进入上下文</div>
+        <span class="timeline-file">agent/safety.py (共享) → agent/state/context.py : add_message()</span>
+      </div>
+    </div>
+
+    <div class="timeline-item state-step">
+      <div class="timeline-content">
+        <div class="timeline-title">Budget 检查 + 状态写入</div>
+        <div class="timeline-desc">检查 step/token 是否超限 → 记录 Step (thought, action, observation) → 更新 tokens_used</div>
+        <span class="timeline-file">agent/state/context.py</span>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-content">
+        <div class="timeline-title">循环：回到 THINK（如果未结束）</div>
+        <div class="timeline-desc">tool observation 作为新消息注入 → 下一轮 think() → 直到 LLM 输出最终答案或 budget 耗尽</div>
+        <span class="timeline-file">agent/trigger/react_loop.py (StateGraph 驱动)</span>
+      </div>
+    </div>
+
+    <div class="timeline-item output-step">
+      <div class="timeline-content">
+        <div class="timeline-title">输出：AgentResult</div>
+        <div class="timeline-desc">answer + success + steps + tokens + stop_reason + full trajectory → 返回调用方 / SSE 推送</div>
+        <span class="timeline-file">agent/agent.py : AgentResult → server.py : RunResponse</span>
+      </div>
+    </div>
+
+  </div>
+</div>

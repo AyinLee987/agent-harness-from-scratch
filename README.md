@@ -224,20 +224,37 @@ trained context encoder; add streaming and partial-result handling; and introduc
 a planner/executor split for multi-step tasks so a higher-level agent decomposes
 work and delegates to focused sub-agents.
 
+## Architecture: Trigger Layer + State Layer
+
+The agent is split into two clear layers:
+
+- **Trigger Layer** (`agent/trigger/`) — decides **when** and **how** the agent acts
+- **State Layer** (`agent/state/`) — manages **what** the agent knows
+
+A **Gateway** sits at the entry point providing rate limiting, concurrency
+control, and request queuing for production deployments.
+
 ## Project layout
 
 ```
 agent/
-  context.py       ExecutionContext: messages, state, step history, token budget
-  tools.py         BaseTool + @tool decorator (auto JSON schema) + ToolRegistry
-  memory.py        short-term (window/summary) + long-term (vector) memory
-  compression.py   ContextCompressor: query-aware context compression
-  safety.py        ToolOutputGuard: indirect prompt-injection defense
-  llm.py           LLM client wrapper: MockLLM (offline) + OpenAILLM (real)
-  agent.py         ReActAgent: run()/step()/think()/act() loop + guardrails
+  trigger/           ← Trigger Layer (when / how)
+    gateway.py       🆕 Unified entry: rate limiting + concurrency + queuing
+    graph.py         Generic StateGraph engine (pattern-agnostic)
+    react_loop.py    🆕 ReAct think→act→observe cycle (extracted from agent.py)
+    dispatch.py      🆕 Tool execution with retry logic
+  state/             ← State Layer (what)
+    context.py       ExecutionContext: messages, steps, budget, run_id
+    memory.py        ShortTermMemory + LongTermMemory (vector recall)
+    store.py         BaseVectorStore → NumPy / SQLite / (FAISS / Qdrant future)
+  tools.py           BaseTool + @tool decorator (auto JSON schema) + ToolRegistry
+  llm.py             LLM clients: MockLLM, OpenAI, DeepSeek, Bailian
+  compression.py     ContextCompressor: query-aware context compression
+  safety.py          ToolOutputGuard: indirect prompt-injection defense
+  agent.py           Thin facade: wires trigger + state + shared infrastructure
   eval/
-    harness.py     runs tasks; rule-based + trajectory + LLM-as-judge scoring
-    tasks.json     sample eval tasks with expected outcomes
+    harness.py       runs tasks; rule-based + trajectory + LLM-as-judge scoring
+    tasks.json       sample eval tasks with expected outcomes
 examples/
   basic_tools.py         calculator + web-search-stub + datetime tools
   context_compression.py query-aware context compression demo
@@ -257,6 +274,8 @@ web/
 - [x] Trajectory-level eval scoring + judge/rule calibration
 - [x] Indirect prompt-injection defense for tool output
 - [x] Correlation ids through the execution context
+- [x] Trigger / State layer architecture separation
+- [x] Gateway with rate limiting + concurrency control
 - [ ] Async multi-agent orchestration (planner/executor)
 - [ ] MCP tool integration
 - [ ] Persistent vector memory (FAISS/Qdrant)
