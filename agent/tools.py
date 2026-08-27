@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import inspect
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Optional, get_args, get_origin, get_type_hints
+from typing import Any, Callable, Dict, List, Literal, Optional, get_args, get_origin, get_type_hints
+
+from .errors import FatalToolError, RecoverableToolError, ToolCallError
 
 
 # Map Python types to JSON-schema primitive types.
@@ -113,9 +115,17 @@ class FunctionTool(BaseTool):
     drive the auto-generated JSON schema.
     """
 
-    def __init__(self, func: Callable[..., Any], name: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        func: Callable[..., Any],
+        name: Optional[str] = None,
+        error_policy: Literal["fatal", "recoverable"] = "fatal",
+    ) -> None:
+        if error_policy not in ("fatal", "recoverable"):
+            raise ValueError("error_policy must be 'fatal' or 'recoverable'.")
         self._func = func
         self.name = name or func.__name__
+        self.error_policy = error_policy
         summary, param_docs = _parse_docstring(func.__doc__)
         self.description = summary or self.name
         self._param_docs = param_docs
@@ -144,10 +154,27 @@ class FunctionTool(BaseTool):
         return {"type": "object", "properties": properties, "required": required}
 
     def run(self, **kwargs: Any) -> str:
-        return str(self._func(**kwargs))
+        # Bind separately so malformed model arguments remain recoverable even
+        # when the tool's own unexpected-error policy is fatal.
+        self._signature.bind(**kwargs)
+        try:
+            return str(self._func(**kwargs))
+        except ToolCallError:
+            raise
+        except Exception as exc:
+            error_type = (
+                RecoverableToolError
+                if self.error_policy == "recoverable"
+                else FatalToolError
+            )
+            raise error_type(str(exc)) from exc
 
 
-def tool(name_or_func: Any = None) -> Any:
+def tool(
+    name_or_func: Any = None,
+    *,
+    error_policy: Literal["fatal", "recoverable"] = "fatal",
+) -> Any:
     """Decorator that turns a function into a :class:`FunctionTool`.
 
     Usage::
@@ -163,10 +190,10 @@ def tool(name_or_func: Any = None) -> Any:
     """
 
     if callable(name_or_func):
-        return FunctionTool(name_or_func)
+        return FunctionTool(name_or_func, error_policy=error_policy)
 
     def decorator(func: Callable[..., Any]) -> FunctionTool:
-        return FunctionTool(func, name=name_or_func)
+        return FunctionTool(func, name=name_or_func, error_policy=error_policy)
 
     return decorator
 
@@ -182,8 +209,18 @@ class ToolRegistry:
     def register(self, t: BaseTool) -> BaseTool:
         if not t.name:
             raise ValueError("Tool must have a non-empty name.")
+        if t.name in self._tools:
+            raise ValueError(f"Tool {t.name!r} is already registered.")
         self._tools[t.name] = t
         return t
+
+    def register_many(self, tools: List[BaseTool]) -> List[BaseTool]:
+        """Register multiple tools, rejecting any name collision."""
+
+        registered: List[BaseTool] = []
+        for item in tools:
+            registered.append(self.register(item))
+        return registered
 
     def __contains__(self, name: str) -> bool:
         return name in self._tools

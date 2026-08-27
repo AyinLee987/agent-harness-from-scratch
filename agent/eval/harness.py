@@ -54,6 +54,7 @@ class Scorecard:
     avg_trajectory_score: float
     judge_successes: Optional[int]
     judge_rule_agreement: Optional[float]
+    stop_reasons: Dict[str, int] = field(default_factory=dict)
     results: List[TaskResult] = field(default_factory=list)
 
     @property
@@ -91,6 +92,9 @@ class Scorecard:
         lines.append(f"Avg trajectory score: {self.avg_trajectory_score:.2f}")
         lines.append(f"Avg steps/task:  {self.avg_steps:.2f}")
         lines.append(f"Avg tokens/task: {self.avg_tokens:.1f}")
+        if self.stop_reasons:
+            sr = "  ".join(f"{k}:{v}" for k, v in sorted(self.stop_reasons.items()))
+            lines.append(f"Stop reasons:  {sr}")
         lines.append("=" * 58)
         return "\n".join(lines)
 
@@ -218,6 +222,10 @@ class EvalHarness:
         avg_traj = (
             sum(r.trajectory_score for r in results) / total if total else 0.0
         )
+        stop_reasons: Dict[str, int] = {}
+        for r in results:
+            root = r.stop_reason.split(":", 1)[0].strip()
+            stop_reasons[root] = stop_reasons.get(root, 0) + 1
         judged = [r for r in results if r.judge_pass is not None]
         judge_successes = (
             sum(1 for r in judged if r.judge_pass) if judged else None
@@ -235,6 +243,7 @@ class EvalHarness:
             avg_trajectory_score=avg_traj,
             judge_successes=judge_successes,
             judge_rule_agreement=judge_rule_agreement,
+            stop_reasons=stop_reasons,
             results=results,
         )
 
@@ -252,6 +261,7 @@ def dump_results(scorecard: Scorecard, path: str) -> None:
             "avg_trajectory_score": scorecard.avg_trajectory_score,
             "judge_successes": scorecard.judge_successes,
             "judge_rule_agreement": scorecard.judge_rule_agreement,
+            "stop_reasons": scorecard.stop_reasons,
         },
         "results": [asdict(r) for r in scorecard.results],
     }

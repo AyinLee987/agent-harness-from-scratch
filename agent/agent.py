@@ -49,6 +49,8 @@ class ReActAgent:
         output_guard: Optional[ToolOutputGuard] = None,
         compress_at_fraction: float = 0.6,
         max_tool_retries: int = 1,
+        loop_detection: bool = True,
+        loop_same_call_limit: int = 3,
     ) -> None:
         self._loop = ReActLoop(
             llm=llm,
@@ -62,6 +64,8 @@ class ReActAgent:
             output_guard=output_guard,
             compress_at_fraction=compress_at_fraction,
             max_tool_retries=max_tool_retries,
+            loop_detection=loop_detection,
+            loop_same_call_limit=loop_same_call_limit,
         )
         # Expose attributes for backward compatibility.
         self.llm = llm

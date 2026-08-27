@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..errors import FatalToolError, RecoverableToolError, ToolCallError
 from ..state.context import ExecutionContext
 from ..tools import ToolRegistry
 
@@ -32,8 +33,8 @@ class ToolDispatcher:
 
         Unknown tools and ``TypeError`` are retried up to ``max_retries``
         times (the model gets a helpful error message and a chance to
-        correct its call).  All other exceptions are caught and returned
-        as error strings without retrying.
+        correct its call). Explicitly recoverable failures are returned to the
+        model. Fatal and unclassified failures abort the current run.
         """
         retry_key = f"retries::{name}"
         retries = ctx.state.get(retry_key, 0)
@@ -62,6 +63,10 @@ class ToolDispatcher:
         # Dispatch.
         try:
             return self.registry.dispatch(name, arguments)
+        except RecoverableToolError as exc:
+            return f"ERROR calling '{name}': {exc}"
+        except FatalToolError:
+            raise
         except TypeError as exc:
             ctx.state[retry_key] = retries + 1
             if retries < self.max_retries:
@@ -70,5 +75,11 @@ class ToolDispatcher:
                     f"Check the arguments and retry."
                 )
             return f"ERROR calling '{name}': {exc}. Giving up after retry."
+        except ToolCallError as exc:
+            raise FatalToolError(
+                f"Tool '{name}' raised an unrecognized classified error: {exc}"
+            ) from exc
         except Exception as exc:
-            return f"ERROR: tool '{name}' raised: {exc}"
+            raise FatalToolError(
+                f"Tool '{name}' failed unexpectedly: {exc}"
+            ) from exc

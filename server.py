@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator
 
 from dotenv import load_dotenv
@@ -34,9 +35,12 @@ from pydantic import BaseModel
 from agent import (
     AgentResult,
     DeepSeekLLM,
+    FatalToolError,
     MockLLM,
     ReActAgent,
+    ToolOutputGuard,
     ToolRegistry,
+    ToolDispatcher,
     tool,
 )
 
@@ -124,6 +128,8 @@ def build_registry() -> ToolRegistry:
 # Build the agent (LLM selection)
 # ---------------------------------------------------------------------------
 REGISTRY = build_registry()
+MCP_MANAGER = None
+OUTPUT_GUARD = ToolOutputGuard()
 
 def _build_llm():
     """Pick LLM: DeepSeek > OpenAI > MockLLM fallback."""
@@ -135,6 +141,54 @@ def _build_llm():
     return MockLLM()
 
 
+def _fetch_mcp_enabled() -> bool:
+    return os.getenv("ENABLE_FETCH_MCP", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Connect explicitly enabled MCP servers and close them on shutdown."""
+
+    global MCP_MANAGER
+    if not _fetch_mcp_enabled():
+        yield
+        return
+
+    try:
+        from agent.mcp import MCPManager, MCPServerConfig, uv_tool_command
+    except ModuleNotFoundError as exc:
+        if exc.name == "mcp":
+            raise RuntimeError(
+                "Fetch MCP is enabled but the MCP SDK is missing. "
+                "Install dependencies with: python -m pip install -r requirements.txt"
+            ) from exc
+        raise
+
+    command, args = uv_tool_command("mcp-server-fetch")
+    fetch = MCPServerConfig.stdio(
+        name="fetch",
+        command=command,
+        args=args,
+        env={"PYTHONIOENCODING": "utf-8"},
+        connect_timeout=float(os.getenv("MCP_FETCH_CONNECT_TIMEOUT", "90")),
+        call_timeout=float(os.getenv("MCP_FETCH_CALL_TIMEOUT", "60")),
+    )
+    manager = MCPManager([fetch])
+    try:
+        tools = await asyncio.to_thread(manager.connect_all)
+        REGISTRY.register_many(tools)
+        MCP_MANAGER = manager
+        yield
+    finally:
+        await asyncio.to_thread(manager.close)
+        MCP_MANAGER = None
+
+
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
@@ -142,6 +196,7 @@ app = FastAPI(
     title="Agent Harness API",
     description="ReAct agent with SSE streaming — no LangChain, pure Python.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -207,7 +262,12 @@ async def list_tools():
 async def run(req: RunRequest):
     """Non-streaming agent run — submit task, get full result."""
     llm = _build_llm()
-    agent = ReActAgent(llm=llm, tools=REGISTRY, max_steps=req.max_steps)
+    agent = ReActAgent(
+        llm=llm,
+        tools=REGISTRY,
+        output_guard=OUTPUT_GUARD,
+        max_steps=req.max_steps,
+    )
 
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, agent.run, req.task)
@@ -219,7 +279,12 @@ async def stream(task: str = Query(..., description="Task for the agent")):
     """SSE streaming endpoint — real-time think / tool_call / tool_result / answer."""
 
     llm = _build_llm()
-    agent = ReActAgent(llm=llm, tools=REGISTRY, max_steps=10)
+    agent = ReActAgent(
+        llm=llm,
+        tools=REGISTRY,
+        output_guard=OUTPUT_GUARD,
+        max_steps=10,
+    )
 
     async def event_stream() -> AsyncGenerator[str, None]:
         from agent.state.context import ExecutionContext
@@ -227,6 +292,7 @@ async def stream(task: str = Query(..., description="Task for the agent")):
         ctx = ExecutionContext(max_steps=agent.max_steps, max_tokens=agent.max_tokens)
         ctx.add_message("system", agent.system_prompt)
         ctx.add_message("user", task)
+        dispatcher = ToolDispatcher(REGISTRY, max_retries=agent._loop.max_tool_retries)
 
         yield _sse("start", {"task": task, "tools": REGISTRY.names()})
 
@@ -271,17 +337,29 @@ async def stream(task: str = Query(..., description="Task for the agent")):
                 for tc in tc_objects
             ])
 
+            fatal_error = None
             for tc in tc_objects:
                 try:
-                    result = REGISTRY.dispatch(tc.name, tc.arguments)
-                except Exception as exc:
-                    result = f"ERROR: {exc}"
+                    result = dispatcher.dispatch(ctx, tc.name, tc.arguments)
+                except FatalToolError as exc:
+                    fatal_error = str(exc)
+                    yield _sse("error", {
+                        "step": step_idx,
+                        "type": "fatal_tool_error",
+                        "message": fatal_error,
+                    })
+                    break
+                scan = OUTPUT_GUARD.scan(result)
+                if scan.suspicious:
+                    result = scan.sanitized
                 ctx.add_message("tool", result, tool_call_id=tc.id, name=tc.name)
                 yield _sse("tool_result", {
                     "step": step_idx,
                     "tool": tc.name,
                     "result": result,
                 })
+            if fatal_error is not None:
+                break
 
         # --- trajectory ---
         yield _sse("done", {"steps": len(ctx.steps), "tokens": ctx.tokens_used})

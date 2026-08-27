@@ -12,9 +12,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from agent import (
     ExecutionContext,
+    FatalToolError,
     LongTermMemory,
     MockLLM,
     ReActAgent,
+    RecoverableToolError,
     ShortTermMemory,
     ToolRegistry,
     tool,
@@ -130,6 +132,119 @@ def test_agent_handles_malformed_tool_call():
     # It should not crash; it stops via budget and returns a graceful message.
     assert result.answer
     assert "ERROR" in result.answer or "stopped" in result.answer.lower()
+
+
+def test_recoverable_tool_error_is_returned_to_model():
+    """A recoverable failure becomes a tool observation and the run continues."""
+
+    from agent.llm import LLMResponse, ToolCall, Usage
+
+    @tool
+    def recoverable() -> str:
+        raise RecoverableToolError("choose a different input")
+
+    class RecoveryLLM(MockLLM):
+        calls = 0
+
+        def chat(self, messages, tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResponse(
+                    tool_calls=[ToolCall(id="r", name="recoverable", arguments={})],
+                    usage=Usage(1, 1),
+                )
+            assert "choose a different input" in messages[-1]["content"]
+            return LLMResponse(content="I handled the tool failure.", usage=Usage(1, 1))
+
+    agent = ReActAgent(llm=RecoveryLLM(), tools=ToolRegistry([recoverable]))
+    result = agent.run("recover")
+
+    assert result.success
+    assert result.stop_reason == "finished"
+    assert "handled" in result.answer
+
+
+def test_fatal_tool_error_aborts_run_without_model_follow_up():
+    """A fatal failure stops the run and is not sent back for model recovery."""
+
+    from agent.llm import LLMResponse, ToolCall, Usage
+
+    @tool
+    def fatal() -> str:
+        raise FatalToolError("tool invariant was violated")
+
+    class FatalLLM(MockLLM):
+        calls = 0
+
+        def chat(self, messages, tools=None):
+            self.calls += 1
+            return LLMResponse(
+                tool_calls=[ToolCall(id="f", name="fatal", arguments={})],
+                usage=Usage(1, 1),
+            )
+
+    llm = FatalLLM()
+    result = ReActAgent(llm=llm, tools=ToolRegistry([fatal])).run("fail")
+
+    assert llm.calls == 1
+    assert not result.success
+    assert result.stop_reason == "fatal_tool_error"
+    assert "invariant" in result.answer
+    assert result.trajectory[-1]["error"] == "tool invariant was violated"
+
+
+def test_unclassified_tool_exception_is_fatal_by_default():
+    """Python cannot enforce exhaustive mapping, so unknown failures fail closed."""
+
+    from agent.llm import LLMResponse, ToolCall, Usage
+
+    @tool
+    def broken() -> str:
+        raise RuntimeError("unexpected bug")
+
+    class BrokenLLM(MockLLM):
+        def chat(self, messages, tools=None):
+            return LLMResponse(
+                tool_calls=[ToolCall(id="b", name="broken", arguments={})],
+                usage=Usage(1, 1),
+            )
+
+    result = ReActAgent(llm=BrokenLLM(), tools=ToolRegistry([broken])).run("fail")
+
+    assert result.stop_reason == "fatal_tool_error"
+    assert not result.success
+    assert "unexpected bug" in result.answer
+
+
+def test_decorator_can_classify_operation_errors_as_recoverable():
+    @tool(error_policy="recoverable")
+    def remote_operation() -> str:
+        raise OSError("temporary network failure")
+
+    with pytest.raises(RecoverableToolError, match="temporary network failure"):
+        remote_operation.run()
+
+
+def test_agent_detects_loop():
+    """A model that repeats the same tool call is stopped as a loop, not just by the step budget."""
+
+    from agent.llm import LLMResponse, ToolCall, Usage
+
+    class LoopingLLM(MockLLM):
+        def chat(self, messages, tools=None):
+            # Never produces an answer — always re-requests the same call.
+            return LLMResponse(
+                tool_calls=[
+                    ToolCall(id="x", name="calculator", arguments={"expression": "1 + 1"})
+                ],
+                usage=Usage(1, 1),
+            )
+
+    agent = ReActAgent(llm=LoopingLLM(), tools=build_registry(), max_steps=10)
+    result = agent.run("keep going")
+    assert result.stop_reason.startswith("loop_detected")
+    assert result.steps < 10
+    assert not result.success
 
 
 # ---------------------------------------------------------------------------

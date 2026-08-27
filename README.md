@@ -96,6 +96,69 @@ print(agent.run("What is 23 times 17?").answer)
 # -> Based on the tool result, the answer is: 391
 ```
 
+## MCP tools
+
+MCP servers connect once, expose their tools dynamically, and register as
+ordinary BaseTool instances. The agent core does not special-case MCP:
+ToolRegistry exposes the remote JSON schemas and ToolDispatcher calls the
+generated proxies like local tools.
+
+This project uses MCP Python SDK v2 and requires Python 3.10+. For the official
+[Fetch MCP server](https://github.com/modelcontextprotocol/servers/tree/main/src/fetch),
+install uv so it can run that v1-based server in an isolated environment:
+
+~~~bash
+pip install -r requirements.txt
+pip install uv
+python examples/mcp_fetch.py
+~~~
+
+The example discovers fetch__fetch and lets ReActAgent invoke it. Namespacing
+prevents tools from different servers from colliding.
+
+To expose Fetch through the FastAPI/Playground server, opt in through the .env
+file after reviewing the internal-network access warning:
+
+~~~dotenv
+ENABLE_FETCH_MCP=1
+~~~
+
+Restart uvicorn after changing this value. The /api/tools response will then
+include fetch__fetch.
+
+~~~python
+import sys
+
+from agent import MockLLM, ReActAgent, ToolOutputGuard, ToolRegistry
+from agent.mcp import MCPManager, MCPServerConfig, uv_tool_command
+
+command, args = uv_tool_command("mcp-server-fetch")
+fetch = MCPServerConfig.stdio(
+    name="fetch",
+    command=command,
+    args=args,
+    env={"PYTHONIOENCODING": "utf-8"},  # recommended on Windows
+)
+
+with MCPManager([fetch]) as mcp:
+    registry = ToolRegistry()
+    registry.register_many(mcp.tools())
+    agent = ReActAgent(
+        llm=MockLLM(),
+        tools=registry,
+        output_guard=ToolOutputGuard(),
+    )
+    result = agent.run("Fetch https://example.com and summarize it.")
+~~~
+
+MCPServerConfig.http connects Streamable HTTP servers. Headers, timeouts,
+working directories, explicit stdio environment variables, and output-size
+limits are configurable.
+
+The Fetch server can access local and internal addresses. Only connect trusted
+MCP servers, restrict deployment network access where appropriate, and keep
+ToolOutputGuard enabled because fetched pages are untrusted model input.
+
 ## Evaluation
 
 Run `python examples/run_eval.py` to score the agent over the sample tasks
@@ -248,6 +311,7 @@ agent/
     memory.py        ShortTermMemory + LongTermMemory (vector recall)
     store.py         BaseVectorStore → NumPy / SQLite / (FAISS / Qdrant future)
   tools.py           BaseTool + @tool decorator (auto JSON schema) + ToolRegistry
+  mcp/               persistent MCP clients + dynamic BaseTool proxies
   llm.py             LLM clients: MockLLM, OpenAI, DeepSeek, Bailian
   compression.py     ContextCompressor: query-aware context compression
   safety.py          ToolOutputGuard: indirect prompt-injection defense
@@ -259,10 +323,12 @@ examples/
   basic_tools.py         calculator + web-search-stub + datetime tools
   context_compression.py query-aware context compression demo
   prompt_injection.py    tool-output injection guard before/after demo
+  mcp_fetch.py            official Fetch MCP registered as fetch__fetch
   memory_demo.py         long-term vector memory recall demo
   run_eval.py            runs the eval harness and prints a scorecard
 tests/
   test_agent.py          unit + integration tests (run entirely on MockLLM)
+  test_mcp.py            MCP discovery, proxy, lifecycle, and result tests
   test_compression.py    tests for the context compressor
   test_safety.py         tests for the prompt-injection guard
 web/
@@ -277,7 +343,7 @@ web/
 - [x] Trigger / State layer architecture separation
 - [x] Gateway with rate limiting + concurrency control
 - [ ] Async multi-agent orchestration (planner/executor)
-- [ ] MCP tool integration
+- [x] MCP tool integration (stdio + Streamable HTTP)
 - [ ] Persistent vector memory (FAISS/Qdrant)
 - [ ] Trained context encoder (LCLM/ACON-style) behind the compressor interface
 - [ ] Per-task regression suite generated from production failures
@@ -285,3 +351,26 @@ web/
 ## License
 
 MIT
+### Tool error classification
+
+Tool failures are classified where the failing operation is implemented:
+
+```python
+from agent import FatalToolError, RecoverableToolError, tool
+
+@tool
+def lookup(key: str) -> str:
+    if not key:
+        raise RecoverableToolError("key is required")  # returned to the model
+    if database_is_corrupt():
+        raise FatalToolError("lookup database is corrupt")  # aborts this run
+    return perform_lookup(key)
+
+@tool(error_policy="recoverable")
+def remote_lookup(key: str) -> str:
+    return call_remote_service(key)  # every unexpected operation error is recoverable
+```
+
+Unclassified exceptions are fatal by default. This fail-closed behavior makes
+tool authors decide explicitly whether the model can repair a failure by
+changing its next action.

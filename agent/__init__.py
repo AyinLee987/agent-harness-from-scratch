@@ -21,6 +21,12 @@ Public surface:
 
 from .agent import AgentResult, ReActAgent
 from .compression import CompressionResult, ContextCompressor
+from .errors import (
+    FatalToolError,
+    RecoverableToolError,
+    RespondToModel,
+    ToolCallError,
+)
 from .llm import (
     BailianLLM,
     BaseLLM,
@@ -103,6 +109,10 @@ __all__ = [
     "ToolOutputGuard",
     "ScanResult",
     # Tools
+    "ToolCallError",
+    "RecoverableToolError",
+    "RespondToModel",
+    "FatalToolError",
     "BaseTool",
     "FunctionTool",
     "ToolRegistry",

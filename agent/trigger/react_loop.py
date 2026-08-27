@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..compression import ContextCompressor
+from ..errors import FatalToolError
 from ..llm import BaseLLM, LLMResponse, ToolCall, estimate_tokens
 from ..safety import ToolOutputGuard
 from ..state.context import ExecutionContext, Step
@@ -66,6 +67,8 @@ class ReActLoop:
         output_guard: Optional[ToolOutputGuard] = None,
         compress_at_fraction: float = 0.6,
         max_tool_retries: int = 1,
+        loop_detection: bool = True,
+        loop_same_call_limit: int = 3,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -78,6 +81,8 @@ class ReActLoop:
         self.compress_at_fraction = compress_at_fraction
         self.output_guard = output_guard
         self.max_tool_retries = max_tool_retries
+        self.loop_detection = loop_detection
+        self.loop_same_call_limit = loop_same_call_limit
         self._dispatcher = ToolDispatcher(tools, max_retries=max_tool_retries)
         self._graph = self._build_graph()
 
@@ -100,7 +105,11 @@ class ReActLoop:
             _route_by_next,
             {"tools": "act", "finish": "__end__"},
         )
-        g.add_edge("act", "think")
+        g.add_conditional_edges(
+            "act",
+            _route_by_next,
+            {"think": "think", "finish": "__end__"},
+        )
         return g
 
     # -- public API ---------------------------------------------------------
@@ -144,6 +153,14 @@ class ReActLoop:
             state["__answer__"] = None
             state["__stop_reason__"] = _budget_stop_reason(ctx)
             return state
+
+        if self.loop_detection:
+            loop_reason = _detect_loop(ctx.steps, self.loop_same_call_limit)
+            if loop_reason:
+                state["__next__"] = "finish"
+                state["__answer__"] = None
+                state["__stop_reason__"] = f"loop_detected: {loop_reason}"
+                return state
 
         step = ctx.new_step()
 
@@ -206,7 +223,17 @@ class ReActLoop:
 
         observations: List[str] = []
         for tc in tool_calls:
-            observation = self._dispatcher.dispatch(ctx, tc.name, tc.arguments)
+            try:
+                observation = self._dispatcher.dispatch(ctx, tc.name, tc.arguments)
+            except FatalToolError as exc:
+                message = str(exc)
+                step.action = {"name": tc.name, "arguments": tc.arguments}
+                step.error = message
+                step.observation = None
+                state["__answer__"] = f"Fatal tool error: {message}"
+                state["__stop_reason__"] = "fatal_tool_error"
+                state["__next__"] = "finish"
+                return state
             if self.output_guard is not None:
                 scan = self.output_guard.scan(observation)
                 if scan.suspicious:
@@ -248,6 +275,53 @@ class ReActLoop:
 
 
 # -- module-level helpers --------------------------------------------------
+def _detect_loop(steps: List[Step], same_call_limit: int = 3) -> Optional[str]:
+    """Return a reason if the trajectory is looping, else ``None``.
+
+    Distinct from the budget guardrail: the step/token budget is a hard ceiling
+    that stops the run no matter what, while this inspects the *content* of the
+    trajectory to decide whether the agent is re-issuing work instead of making
+    progress. Two deterministic signals, both read from the recorded steps (no
+    extra LLM calls, no dependencies):
+
+    * **repeated call** — the most recent ``(tool, arguments)`` has been issued
+      ``same_call_limit`` times in total (this also catches N-cycles);
+    * **oscillation** — the last four calls alternate ``A -> B -> A -> B``.
+
+    Arguments are canonicalized (JSON, sorted keys, lowercased) so equivalent
+    spellings of a call count as the same call.
+
+    A known blind spot: a loop that *varies* its arguments each time (e.g.
+    ``page=1``, ``page=2``, ...) is not caught here; that needs an
+    observation-novelty signal, not a call-identity one.
+    """
+
+    calls: List[Tuple[str, str]] = []
+    for s in steps:
+        action = s.action
+        if not action:
+            continue
+        name = action.get("name")
+        args = action.get("arguments") or {}
+        try:
+            canon = json.dumps(args, sort_keys=True).lower()
+        except (TypeError, ValueError):
+            canon = str(args).lower()
+        calls.append((name, canon))
+
+    if not calls:
+        return None
+
+    name, canon = calls[-1]
+    if sum(1 for c in calls if c == (name, canon)) >= same_call_limit:
+        return f"repeated call '{name}' x{same_call_limit}"
+
+    if len(calls) >= 4 and calls[-1] == calls[-3] and calls[-2] == calls[-4]:
+        return f"oscillating '{calls[-2][0]}' <-> '{calls[-1][0]}'"
+
+    return None
+
+
 def _route_by_next(state: Dict[str, Any]) -> str:
     return state.get("__next__", "finish")
 

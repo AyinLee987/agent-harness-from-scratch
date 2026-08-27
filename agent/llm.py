@@ -284,6 +284,13 @@ class MockLLM(BaseLLM):
         ):
             return "memory_search", {"query": text}
 
+        fetch_tools = [
+            name for name in tool_names if name == "fetch" or name.endswith("__fetch")
+        ]
+        url_match = re.search(r"https?://[^\s<>'\"]+", text)
+        if fetch_tools and ("fetch" in lower or url_match):
+            return fetch_tools[0], {"url": url_match.group(0) if url_match else text}
+
         if "web_search" in tool_names and any(
             kw in lower
             for kw in ("search", "who", "what is", "capital", "tallest", "speed of")
