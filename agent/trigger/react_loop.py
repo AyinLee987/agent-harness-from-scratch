@@ -12,6 +12,7 @@ retry-once-then-fail handling of malformed tool calls.
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -113,13 +114,21 @@ class ReActLoop:
         return g
 
     # -- public API ---------------------------------------------------------
-    def run(self, task: str) -> AgentResult:
+    def run(
+        self,
+        task: str,
+        cancellation_event: Optional[threading.Event] = None,
+    ) -> AgentResult:
         """Run the agent to completion on ``task`` and return an :class:`AgentResult`."""
         ctx = ExecutionContext(max_steps=self.max_steps, max_tokens=self.max_tokens)
         ctx.add_message("system", self.system_prompt)
         ctx.add_message("user", task)
 
-        state: Dict[str, Any] = {"ctx": ctx, "loop": self}
+        state: Dict[str, Any] = {
+            "ctx": ctx,
+            "loop": self,
+            "__cancellation_event__": cancellation_event,
+        }
         executor = self._graph.compile()
         state = executor(state)
 
@@ -147,6 +156,13 @@ class ReActLoop:
     def _think_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Graph node: one LLM call with memory management and compression."""
         ctx: ExecutionContext = state["ctx"]
+
+        cancellation_event = state.get("__cancellation_event__")
+        if cancellation_event is not None and cancellation_event.is_set():
+            state["__next__"] = "finish"
+            state["__answer__"] = None
+            state["__stop_reason__"] = "cancelled"
+            return state
 
         if ctx.over_budget():
             state["__next__"] = "finish"

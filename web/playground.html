@@ -17,6 +17,7 @@
     --result-bg: #e8f5e9;
     --error-bg: #fce4ec;
     --thinking: #ff9800;
+    --worker-line: #c7c2f5;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -29,6 +30,7 @@
       --tool-bg: #1e1a3a;
       --result-bg: #1a2e1a;
       --error-bg: #3a1a1a;
+      --worker-line: #4b457a;
     }
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -55,6 +57,7 @@
   .event.tool-result { background: var(--result-bg); border-left: 3px solid #4caf50; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 13px; }
   .event.answer { background: var(--card-bg); border: 2px solid var(--accent); font-weight: 500; }
   .event.error { background: var(--error-bg); border-left: 3px solid #e53935; }
+  .event.task-root { background: var(--tool-bg); border: 1px solid var(--accent-dim); }
   .event .label { font-size: 11px; text-transform: uppercase; font-weight: 700; letter-spacing: 0.5px; margin-bottom: 4px; color: var(--text-dim); display: block; }
   .event .label.thinking { color: var(--thinking); }
   .tool-name { font-weight: 600; color: var(--accent); }
@@ -73,6 +76,22 @@
   .quick-tasks button { background: var(--card-bg); color: var(--accent); border: 1px solid var(--border); font-size: 12px; padding: 6px 14px; font-weight: 400; }
   .quick-tasks button:hover { border-color: var(--accent); }
   .stats { display: flex; gap: 16px; font-size: 12px; color: var(--text-dim); justify-content: space-between; }
+  .agent-tree { display: flex; flex-direction: column; gap: 10px; }
+  .leader-node { padding: 14px 16px; background: var(--card-bg); border: 2px solid var(--accent); border-radius: 10px; }
+  .node-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+  .node-title { font-weight: 700; }
+  .node-meta { color: var(--text-dim); font: 11px 'Cascadia Code', 'Fira Code', monospace; }
+  .node-answer { white-space: pre-wrap; word-break: break-word; }
+  .state-pill { margin-left: auto; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+  .state-pill.succeeded { background: var(--result-bg); color: #2e7d32; }
+  .state-pill.failed, .state-pill.fatal_tool_error, .state-pill.timed_out { background: var(--error-bg); color: #e53935; }
+  .state-pill.cancelled { background: var(--border); color: var(--text-dim); }
+  .workers { position: relative; margin-left: 24px; padding-left: 22px; display: flex; flex-direction: column; gap: 10px; }
+  .workers::before { content: ""; position: absolute; left: 0; top: 0; bottom: 20px; width: 2px; background: var(--worker-line); }
+  .worker-card { position: relative; padding: 12px 14px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 9px; }
+  .worker-card::before { content: ""; position: absolute; left: -22px; top: 21px; width: 21px; height: 2px; background: var(--worker-line); }
+  .worker-card.failed { border-color: #e57373; }
+  @media (max-width: 620px) { .workers { margin-left: 10px; } }
 </style>
 </head>
 <body>
@@ -89,6 +108,7 @@
     <button onclick="run('Calculate (12 + 8) * 5 then subtract 30')">(12+8)×5 再减30</button>
     <button onclick="run('What is the speed of light?')">光速</button>
     <button onclick="run('Who created Python?')">Python 之父</button>
+    <button onclick="run('Research Python and JavaScript, then compare their strengths')">多角色对比</button>
   </div>
   <div class="trace" id="trace"></div>
   <div class="stats" id="stats"><span></span><span></span></div>
@@ -100,9 +120,14 @@
 </main>
 
 <script>
-const API = 'http://127.0.0.1:8000';
+const API = window.location.protocol === 'http:' || window.location.protocol === 'https:'
+  ? window.location.origin
+  : 'http://127.0.0.1:8000';
 let abortCtrl = null;
 let stepCount = 0;
+let pendingSpawnArgs = [];
+let subagentCards = new Map();
+let runSummary = null;
 
 async function init() {
   try {
@@ -125,6 +150,9 @@ function run(task) {
   trace.innerHTML = '';
   document.getElementById('stats').innerHTML = '<span></span><span></span>';
   stepCount = 0;
+  pendingSpawnArgs = [];
+  subagentCards = new Map();
+  runSummary = null;
   startStream(t);
 }
 
@@ -177,7 +205,7 @@ async function startStream(task) {
 
           switch (currentEvent) {
             case 'start':
-              addEvent('think', `<span class="label">📝 任务</span>${h(data.task)}`);
+              addEvent('think', `<span class="label">📝 Leader 任务 · ${h(data.root_run_id || '')}</span>${h(data.task)}`);
               break;
             case 'think_start':
               stepCount = data.step + 1;
@@ -192,6 +220,7 @@ async function startStream(task) {
               break;
             case 'tool_call':
               streamingEl = null;
+              if (data.tool.name === 'spawn_subagent') pendingSpawnArgs.push(data.tool.arguments || {});
               addEvent('tool-call',
                 `<span class="label">🔧 工具调用</span>
                  <span class="tool-name">${h(data.tool.name)}</span>
@@ -202,6 +231,7 @@ async function startStream(task) {
             case 'tool_result':
               addEvent('tool-result',
                 `<span class="label">📋 结果 · ${h(data.tool)}</span>${h(data.result)}`);
+              handleDelegationResult(data.tool, data.result);
               break;
             case 'answer':
               streamingEl = null;
@@ -210,15 +240,21 @@ async function startStream(task) {
             case 'error':
               addEvent('error', `<span class="label">❌ 错误</span>${h(data.message || '')}`);
               break;
+            case 'done':
+              runSummary = data;
+              for (const worker of data.subagents || []) upsertSubagent(worker);
+              break;
           }
         }
       }
     }
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    const root = runSummary?.root_run_id ? `Root ${h(runSummary.root_run_id)} · ` : '';
+    const workerCount = runSummary?.subagents?.length || subagentCards.size;
     document.getElementById('stats').innerHTML =
-      `<span>${stepCount} 步 · ${elapsed}s</span>
-       <span><a href="#" onclick="document.getElementById('trace').scrollTop=0;return false">↑ 回到顶部</a></span>`;
+      `<span>${root}${stepCount} 步 · ${elapsed}s</span>
+       <span>${workerCount ? `${workerCount} 个 Subagent · ` : ''}<a href="#" onclick="document.getElementById('trace').scrollTop=0;return false">↑ 回到顶部</a></span>`;
 
   } catch (e) {
     if (e.name !== 'AbortError') {
@@ -228,6 +264,68 @@ async function startStream(task) {
     abortCtrl = null;
     setRunning(false);
   }
+}
+
+function handleDelegationResult(toolName, rendered) {
+  if (!['spawn_subagent', 'wait_subagents', 'get_subagent_status', 'cancel_subagent'].includes(toolName)) return;
+  let payload;
+  try { payload = JSON.parse(rendered); } catch (_) {
+    if (toolName === 'spawn_subagent') pendingSpawnArgs.shift();
+    return;
+  }
+  if (toolName === 'spawn_subagent') {
+    const args = pendingSpawnArgs.shift() || {};
+    upsertSubagent({ ...payload, instruction: args.task });
+  } else if (toolName === 'wait_subagents') {
+    for (const worker of payload) upsertSubagent(worker);
+  } else {
+    const result = payload.result ? { ...payload, ...payload.result } : payload;
+    upsertSubagent(result);
+  }
+}
+
+function ensureSubagentTree() {
+  let tree = document.getElementById('subagent-tree');
+  if (tree) return tree.querySelector('.workers');
+  tree = document.createElement('div');
+  tree.id = 'subagent-tree';
+  tree.className = 'agent-tree';
+  tree.innerHTML = `
+    <div class="leader-node">
+      <div class="node-head"><span>👑</span><span class="node-title">Leader 委派的 Subagents</span></div>
+    </div>
+    <div class="workers"></div>`;
+  document.getElementById('trace').appendChild(tree);
+  return tree.querySelector('.workers');
+}
+
+function upsertSubagent(worker) {
+  if (!worker || !worker.task_id) return;
+  const previous = subagentCards.get(worker.task_id)?.data || {};
+  const data = { ...previous, ...worker };
+  const state = data.status || (data.success ? 'succeeded' : data.stop_reason) || 'pending';
+  let entry = subagentCards.get(data.task_id);
+  if (!entry) {
+    const card = document.createElement('div');
+    ensureSubagentTree().appendChild(card);
+    entry = { card, data };
+    subagentCards.set(data.task_id, entry);
+  }
+  entry.data = data;
+  entry.card.className = `worker-card ${data.success === false ? 'failed' : ''}`;
+  entry.card.innerHTML = `
+    <div class="node-head">
+      <span>↳</span><span class="node-title">${h(data.agent_name || 'worker')}</span>
+      <span class="node-meta">${h(data.task_id)} · ${Number(data.steps || 0)} steps · ${Number(data.tokens || 0)} tokens</span>
+      <span class="state-pill ${stateClass(state)}">${h(state)}</span>
+    </div>
+    ${data.instruction ? `<div class="node-meta">任务：${h(data.instruction)}</div>` : ''}
+    ${data.answer ? `<div class="node-answer">${h(data.answer)}</div>` : ''}
+    ${data.error_type ? `<div class="node-meta">error: ${h(data.error_type)}</div>` : ''}`;
+}
+
+function stateClass(state) {
+  return String(state || 'failed').toLowerCase().replace(/[^a-z0-9_-]/g, '-');
 }
 
 function h(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }

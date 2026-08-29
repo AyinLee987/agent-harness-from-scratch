@@ -33,11 +33,15 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from agent import (
+    AgentRegistry,
+    AgentSpec,
     AgentResult,
     DeepSeekLLM,
     FatalToolError,
     MockLLM,
+    MultiAgentOrchestrator,
     ReActAgent,
+    RunBudget,
     ToolOutputGuard,
     ToolRegistry,
     ToolDispatcher,
@@ -150,6 +154,80 @@ def _fetch_mcp_enabled() -> bool:
     }
 
 
+LEADER_SYSTEM_PROMPT = (
+    "You are the Leader. Solve ordinary tasks directly with the normal tools. "
+    "When a task is genuinely separable or benefits from specialist work, use "
+    "spawn_subagent with the researcher or analyst role. Start independent "
+    "subtasks before calling wait_subagents so they can run in parallel. Read "
+    "the Worker results, recover from child failures when possible, and return "
+    "one coherent final answer. Do not delegate simple tasks unnecessarily."
+)
+
+
+def _copy_tools(*names: str) -> ToolRegistry:
+    selected = [REGISTRY.get(name) for name in names]
+    return ToolRegistry([item for item in selected if item is not None])
+
+
+def _build_leader_runtime(max_steps: int = 10):
+    """Create a request-scoped Leader whose delegation ability is a tool set."""
+
+    workers = AgentRegistry()
+
+    def build_researcher() -> ReActAgent:
+        names = ["web_search"]
+        if "fetch__fetch" in REGISTRY:
+            names.append("fetch__fetch")
+        return ReActAgent(
+            llm=_build_llm(),
+            tools=_copy_tools(*names),
+            system_prompt=(
+                "You are a research Worker. Investigate only the delegated task, "
+                "use available source tools when useful, and return a concise "
+                "evidence-focused report to the Leader."
+            ),
+            output_guard=OUTPUT_GUARD,
+            max_steps=max_steps,
+        )
+
+    def build_analyst() -> ReActAgent:
+        return ReActAgent(
+            llm=_build_llm(),
+            tools=_copy_tools("calculator", "datetime"),
+            system_prompt=(
+                "You are an analysis Worker. Solve only the delegated task, "
+                "return a focused report, and do not delegate further."
+            ),
+            output_guard=OUTPUT_GUARD,
+            max_steps=max_steps,
+        )
+
+    workers.register(
+        AgentSpec("researcher", "Researches web pages and source material."),
+        build_researcher,
+    )
+    workers.register(
+        AgentSpec("analyst", "Performs focused analysis and calculations."),
+        build_analyst,
+    )
+    orchestrator = MultiAgentOrchestrator(
+        workers,
+        RunBudget(max_subagents=6, max_parallel_tasks=3),
+    )
+    leader_registry = ToolRegistry(
+        [REGISTRY.get(name) for name in REGISTRY.names() if REGISTRY.get(name)]
+    )
+    leader_registry.register_many(orchestrator.leader_tools())
+    leader = ReActAgent(
+        llm=_build_llm(),
+        tools=leader_registry,
+        system_prompt=LEADER_SYSTEM_PROMPT,
+        output_guard=OUTPUT_GUARD,
+        max_steps=max_steps,
+    )
+    return orchestrator, leader
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Connect explicitly enabled MCP servers and close them on shutdown."""
@@ -255,22 +333,23 @@ async def health():
 
 @app.get("/api/tools")
 async def list_tools():
-    return {"tools": REGISTRY.schemas()}
+    orchestrator, leader = _build_leader_runtime()
+    try:
+        return {"tools": leader.tools.schemas()}
+    finally:
+        orchestrator.close()
 
 
 @app.post("/api/run", response_model=RunResponse)
 async def run(req: RunRequest):
-    """Non-streaming agent run — submit task, get full result."""
-    llm = _build_llm()
-    agent = ReActAgent(
-        llm=llm,
-        tools=REGISTRY,
-        output_guard=OUTPUT_GUARD,
-        max_steps=req.max_steps,
-    )
+    """Run the request through a Leader with optional delegation tools."""
 
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, agent.run, req.task)
+    def execute():
+        orchestrator, leader = _build_leader_runtime(req.max_steps)
+        with orchestrator:
+            return orchestrator.run_leader(leader, req.task)
+
+    result = await asyncio.to_thread(execute)
     return RunResponse.from_result(result)
 
 
@@ -278,13 +357,9 @@ async def run(req: RunRequest):
 async def stream(task: str = Query(..., description="Task for the agent")):
     """SSE streaming endpoint — real-time think / tool_call / tool_result / answer."""
 
-    llm = _build_llm()
-    agent = ReActAgent(
-        llm=llm,
-        tools=REGISTRY,
-        output_guard=OUTPUT_GUARD,
-        max_steps=10,
-    )
+    orchestrator, agent = _build_leader_runtime(max_steps=10)
+    llm = agent.llm
+    leader_registry = agent.tools
 
     async def event_stream() -> AsyncGenerator[str, None]:
         from agent.state.context import ExecutionContext
@@ -292,77 +367,44 @@ async def stream(task: str = Query(..., description="Task for the agent")):
         ctx = ExecutionContext(max_steps=agent.max_steps, max_tokens=agent.max_tokens)
         ctx.add_message("system", agent.system_prompt)
         ctx.add_message("user", task)
-        dispatcher = ToolDispatcher(REGISTRY, max_retries=agent._loop.max_tool_retries)
+        dispatcher = ToolDispatcher(leader_registry)
+        stop_reason = "max_steps"
+        root_run_id = ""
 
-        yield _sse("start", {"task": task, "tools": REGISTRY.names()})
-
-        for step_idx in range(agent.max_steps):
-            if ctx.over_budget():
-                yield _sse("error", {"message": f"Budget exceeded: {ctx.budget_reason()}"})
-                break
-
-            # --- THINK phase with streaming ---
-            yield _sse("think_start", {"step": step_idx})
-            full_content = ""
-            tool_calls = []
-
-            async for event in llm.astream(
-                agent.short_term.manage(ctx.messages),
-                tools=REGISTRY.schemas(),
-            ):
-                if event["type"] == "text":
-                    full_content += event["data"]
-                    yield _sse("text", {"step": step_idx, "token": event["data"]})
-                elif event["type"] == "tool_call":
-                    tool_calls.append(event["data"])
-                    yield _sse("tool_call", {"step": step_idx, "tool": event["data"]})
-
-            ctx.add_tokens(estimate_tokens_simple(full_content))
-
-            # No tool calls → final answer.
-            if not tool_calls:
-                answer = full_content.strip()
-                ctx.add_message("assistant", answer)
-                yield _sse("answer", {"step": step_idx, "text": answer})
-                break
-
-            # --- ACT phase ---
-            yield _sse("act_start", {"step": step_idx, "tools": [t["name"] for t in tool_calls]})
-
-            from agent.llm import ToolCall as TCT
-            tc_objects = [TCT(id=t["id"], name=t["name"], arguments=t["arguments"]) for t in tool_calls]
-
-            ctx.add_message("assistant", full_content, tool_calls=[
-                {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)}}
-                for tc in tc_objects
-            ])
-
-            fatal_error = None
-            for tc in tc_objects:
-                try:
-                    result = dispatcher.dispatch(ctx, tc.name, tc.arguments)
-                except FatalToolError as exc:
-                    fatal_error = str(exc)
-                    yield _sse("error", {
-                        "step": step_idx,
-                        "type": "fatal_tool_error",
-                        "message": fatal_error,
-                    })
-                    break
-                scan = OUTPUT_GUARD.scan(result)
-                if scan.suspicious:
-                    result = scan.sanitized
-                ctx.add_message("tool", result, tool_call_id=tc.id, name=tc.name)
-                yield _sse("tool_result", {
-                    "step": step_idx,
-                    "tool": tc.name,
-                    "result": result,
+        try:
+            with orchestrator.leader_scope() as root_run_id:
+                yield _sse("start", {
+                    "task": task,
+                    "tools": leader_registry.names(),
+                    "root_run_id": root_run_id,
                 })
-            if fatal_error is not None:
-                break
 
-        # --- trajectory ---
-        yield _sse("done", {"steps": len(ctx.steps), "tokens": ctx.tokens_used})
+                async for payload in _stream_leader_steps(
+                    task=task,
+                    agent=agent,
+                    llm=llm,
+                    registry=leader_registry,
+                    dispatcher=dispatcher,
+                    ctx=ctx,
+                ):
+                    if payload[0] == "__stop__":
+                        stop_reason = payload[1]["stop_reason"]
+                    else:
+                        yield _sse(payload[0], payload[1])
+
+            subagents = [
+                item.to_dict() for item in orchestrator.results_for_run(root_run_id)
+            ]
+            yield _sse("done", {
+                "steps": len(ctx.steps),
+                "tokens": ctx.tokens_used + sum(item["tokens"] for item in subagents),
+                "success": stop_reason == "finished",
+                "stop_reason": stop_reason,
+                "root_run_id": root_run_id,
+                "subagents": subagents,
+            })
+        finally:
+            await asyncio.to_thread(orchestrator.close)
 
     return StreamingResponse(
         event_stream(),
@@ -373,6 +415,98 @@ async def stream(task: str = Query(..., description="Task for the agent")):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+async def _stream_leader_steps(*, task, agent, llm, registry, dispatcher, ctx):
+    """Yield the existing streaming ReAct events for one active Leader scope."""
+
+    stop_reason = "max_steps"
+    for step_idx in range(agent.max_steps):
+        if ctx.over_budget():
+            stop_reason = "budget"
+            yield "error", {"message": f"Budget exceeded: {ctx.budget_reason()}"}
+            break
+
+        # --- THINK phase with streaming ---
+        yield "think_start", {"step": step_idx}
+        full_content = ""
+        tool_calls = []
+
+        async for event in llm.astream(
+            agent.short_term.manage(ctx.messages),
+            tools=registry.schemas(),
+        ):
+            if event["type"] == "text":
+                full_content += event["data"]
+                yield "text", {"step": step_idx, "token": event["data"]}
+            elif event["type"] == "tool_call":
+                tool_calls.append(event["data"])
+                yield "tool_call", {"step": step_idx, "tool": event["data"]}
+
+        ctx.add_tokens(estimate_tokens_simple(full_content))
+
+        # No tool calls → final answer.
+        if not tool_calls:
+            answer = full_content.strip()
+            ctx.add_message("assistant", answer)
+            stop_reason = "finished"
+            yield "answer", {"step": step_idx, "text": answer}
+            break
+
+        # --- ACT phase ---
+        yield "act_start", {
+            "step": step_idx,
+            "tools": [item["name"] for item in tool_calls],
+        }
+
+        from agent.llm import ToolCall as TCT
+
+        tc_objects = [
+            TCT(id=item["id"], name=item["name"], arguments=item["arguments"])
+            for item in tool_calls
+        ]
+        ctx.add_message(
+            "assistant",
+            full_content,
+            tool_calls=[
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": json.dumps(tc.arguments),
+                    },
+                }
+                for tc in tc_objects
+            ],
+        )
+
+        fatal_error = None
+        for tc in tc_objects:
+            try:
+                result = dispatcher.dispatch(ctx, tc.name, tc.arguments)
+            except FatalToolError as exc:
+                fatal_error = str(exc)
+                stop_reason = "fatal_tool_error"
+                yield "error", {
+                    "step": step_idx,
+                    "type": "fatal_tool_error",
+                    "message": fatal_error,
+                }
+                break
+            scan = OUTPUT_GUARD.scan(result)
+            if scan.suspicious:
+                result = scan.sanitized
+            ctx.add_message("tool", result, tool_call_id=tc.id, name=tc.name)
+            yield "tool_result", {
+                "step": step_idx,
+                "tool": tc.name,
+                "result": result,
+            }
+        if fatal_error is not None:
+            break
+
+    yield "__stop__", {"stop_reason": stop_reason}
 
 
 # -- helpers ---------------------------------------------------------------

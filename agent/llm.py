@@ -183,6 +183,30 @@ class MockLLM(BaseLLM):
         # (1) Do we already have observations to answer from?
         observations = [m for m in messages if m.get("role") == "tool"]
         if observations:
+            latest = observations[-1]
+            if (
+                latest.get("name") == "spawn_subagent"
+                and "wait_subagents" in tool_names
+            ):
+                try:
+                    spawned = json.loads(str(latest.get("content") or ""))
+                    task_id = spawned["task_id"]
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    pass
+                else:
+                    return LLMResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call_wait_subagents",
+                                name="wait_subagents",
+                                arguments={
+                                    "task_ids": [task_id],
+                                    "timeout_seconds": 30.0,
+                                },
+                            )
+                        ],
+                        usage=Usage(prompt_tokens, 8),
+                    )
             answer = self._synthesize_answer(messages, observations)
             return LLMResponse(
                 content=answer,
@@ -261,6 +285,24 @@ class MockLLM(BaseLLM):
         self, text: str, tool_names: set
     ) -> Optional[tuple[str, Dict[str, Any]]]:
         lower = text.lower()
+
+        if "spawn_subagent" in tool_names and any(
+            keyword in lower
+            for keyword in (
+                "delegate",
+                "subagent",
+                "sub-agent",
+                "worker agent",
+                "委派",
+                "子任务",
+                "子代理",
+            )
+        ):
+            role = "researcher" if any(
+                keyword in lower
+                for keyword in ("research", "search", "fetch", "web", "调查", "检索")
+            ) else "analyst"
+            return "spawn_subagent", {"role": role, "task": text}
 
         if "calculator" in tool_names:
             expr = self._extract_expression(text)

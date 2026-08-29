@@ -12,7 +12,7 @@ from mcp import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agent import MockLLM, ToolRegistry, tool
+from agent import MockLLM, RecoverableToolError, ToolRegistry, tool
 from agent.mcp import (
     MCPConnectionError,
     MCPManager,
@@ -160,6 +160,7 @@ def test_nested_connection_errors_include_the_real_cause():
 
 
 def test_result_conversion_handles_text_structured_media_and_errors():
+    assert issubclass(MCPToolCallError, RecoverableToolError)
     result = types.CallToolResult(
         content=[
             types.TextContent(text="hello"),

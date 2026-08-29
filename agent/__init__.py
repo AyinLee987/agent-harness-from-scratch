@@ -37,6 +37,17 @@ from .llm import (
     ToolCall,
     Usage,
 )
+from .multi_agent import (
+    AgentRegistry,
+    AgentSpec,
+    MultiAgentOrchestrator,
+    MultiAgentRunResult,
+    RunBudget,
+    SubagentResult,
+    SubagentTask,
+    TaskStatus,
+    create_leader_tools,
+)
 from .safety import ScanResult, ToolOutputGuard
 from .state import (
     BaseVectorStore,
@@ -85,6 +96,16 @@ __all__ = [
     "RateLimitExceeded",
     "ConcurrencyLimitExceeded",
     "QueueTimeout",
+    # Multi-agent
+    "AgentRegistry",
+    "AgentSpec",
+    "MultiAgentOrchestrator",
+    "MultiAgentRunResult",
+    "RunBudget",
+    "SubagentResult",
+    "SubagentTask",
+    "TaskStatus",
+    "create_leader_tools",
     # State layer
     "ExecutionContext",
     "Step",

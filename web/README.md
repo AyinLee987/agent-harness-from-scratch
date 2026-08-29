@@ -1,4 +1,14 @@
-# ReAct Agent Playground (web demo)
+# Agent Playgrounds
+
+The project contains two frontends:
+
+- `playground.html` is served by FastAPI at `http://127.0.0.1:8000`. It calls
+  the real Python backend and streams one Leader run. When the Leader chooses
+  its delegation tools, Subagent task cards appear inside the same trajectory.
+- `src/` is a separate deterministic browser-only React demo. It does not call
+  the Python backend and remains useful for static hosting.
+
+## React demo
 
 An interactive, browser-only demo of
 [agent-harness-from-scratch](../). It runs a deterministic TypeScript mock of the

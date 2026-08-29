@@ -348,10 +348,7 @@ web/
 - [ ] Trained context encoder (LCLM/ACON-style) behind the compressor interface
 - [ ] Per-task regression suite generated from production failures
 
-## License
-
-MIT
-### Tool error classification
+## Tool error classification
 
 Tool failures are classified where the failing operation is implemented:
 
@@ -374,3 +371,47 @@ def remote_lookup(key: str) -> str:
 Unclassified exceptions are fatal by default. This fail-closed behavior makes
 tool authors decide explicitly whether the model can repair a failure by
 changing its next action.
+
+## Leader and Subagents
+
+`MultiAgentOrchestrator` exposes Worker lifecycle operations as ordinary tools
+to a Leader. Each registry factory must create a fresh `ReActAgent`, which keeps
+Worker conversations and mutable memory isolated during parallel execution.
+
+```python
+from agent import (
+    AgentRegistry, AgentSpec, MultiAgentOrchestrator, ReActAgent,
+    RunBudget, ToolRegistry,
+)
+
+workers = AgentRegistry()
+workers.register(
+    AgentSpec("researcher", "Fetches and summarizes source material."),
+    lambda: ReActAgent(llm=llm, tools=research_tools),
+)
+
+with MultiAgentOrchestrator(
+    workers,
+    RunBudget(max_subagents=6, max_parallel_tasks=3),
+) as orchestrator:
+    leader_tools = ToolRegistry(orchestrator.leader_tools())
+    leader = ReActAgent(llm=leader_llm, tools=leader_tools)
+    result = orchestrator.run_leader(leader, "Research and compare the options")
+```
+
+The Leader receives `spawn_subagent`, `get_subagent_status`,
+`wait_subagents`, and `cancel_subagent`. A child fatal error terminates only
+that child and is returned as structured data; orchestration invariant failures
+remain fatal to the root run. Root completion cancels orphan tasks, and hard
+limits cover task count, parallelism, duplicate dispatches, depth, and Worker
+execution time.
+
+The normal FastAPI `/api/run` and `/api/stream` entry points always run this
+Leader. Delegation is not a separate mode: `spawn_subagent` and the other
+lifecycle operations are simply part of the Leader's tool list. The model uses
+them only when the task benefits from Worker specialization or parallelism.
+The built-in server registers `researcher` and `analyst` Worker roles.
+
+## License
+
+MIT

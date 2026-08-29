@@ -19,6 +19,7 @@ Example::
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Dict, Optional
 
 from .compression import ContextCompressor
@@ -78,6 +79,10 @@ class ReActAgent:
         self.compressor = compressor
         self.output_guard = output_guard
 
-    def run(self, task: str) -> AgentResult:
+    def run(
+        self,
+        task: str,
+        cancellation_event: Optional[threading.Event] = None,
+    ) -> AgentResult:
         """Run the agent to completion on ``task``."""
-        return self._loop.run(task)
+        return self._loop.run(task, cancellation_event=cancellation_event)
