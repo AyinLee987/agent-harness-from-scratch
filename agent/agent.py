@@ -20,10 +20,12 @@ Example::
 from __future__ import annotations
 
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 from .compression import ContextCompressor
+from .context import ContextProvider
 from .llm import BaseLLM
+from .memory import MemoryManager
 from .safety import ToolOutputGuard
 from .state.memory import LongTermMemory, ShortTermMemory
 from .tools import ToolRegistry
@@ -52,6 +54,11 @@ class ReActAgent:
         max_tool_retries: int = 1,
         loop_detection: bool = True,
         loop_same_call_limit: int = 3,
+        agent_name: str = "agent",
+        memory_manager: Optional[MemoryManager] = None,
+        memory_namespace: str = "default",
+        memory_subject_id: str = "anonymous",
+        context_providers: Optional[Sequence[ContextProvider]] = None,
     ) -> None:
         self._loop = ReActLoop(
             llm=llm,
@@ -67,6 +74,11 @@ class ReActAgent:
             max_tool_retries=max_tool_retries,
             loop_detection=loop_detection,
             loop_same_call_limit=loop_same_call_limit,
+            agent_name=agent_name,
+            memory_manager=memory_manager,
+            memory_namespace=memory_namespace,
+            memory_subject_id=memory_subject_id,
+            context_providers=context_providers,
         )
         # Expose attributes for backward compatibility.
         self.llm = llm
@@ -78,6 +90,11 @@ class ReActAgent:
         self.long_term = long_term
         self.compressor = compressor
         self.output_guard = output_guard
+        self.agent_name = agent_name
+        self.memory_manager = memory_manager
+        self.memory_namespace = memory_namespace
+        self.memory_subject_id = memory_subject_id
+        self.context_providers = list(context_providers or [])
 
     def run(
         self,

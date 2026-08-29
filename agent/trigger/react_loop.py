@@ -12,13 +12,18 @@ retry-once-then-fail handling of malformed tool calls.
 from __future__ import annotations
 
 import json
+import logging
 import threading
+import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..compression import ContextCompressor
+from ..context import ContextProvider
 from ..errors import FatalToolError
 from ..llm import BaseLLM, LLMResponse, ToolCall, estimate_tokens
+from ..memory import MemoryManager, RunCompletedEvent
+from ..observability import bind_log_context, get_logger, log_event
 from ..safety import ToolOutputGuard
 from ..state.context import ExecutionContext, Step
 from ..state.memory import LongTermMemory, ShortTermMemory
@@ -33,6 +38,8 @@ DEFAULT_SYSTEM_PROMPT = (
     "or domain knowledge, call it proactively. When you have enough information, "
     "respond with a final answer and do not call any more tools."
 )
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -70,6 +77,11 @@ class ReActLoop:
         max_tool_retries: int = 1,
         loop_detection: bool = True,
         loop_same_call_limit: int = 3,
+        agent_name: str = "agent",
+        memory_manager: Optional[MemoryManager] = None,
+        memory_namespace: str = "default",
+        memory_subject_id: str = "anonymous",
+        context_providers: Optional[Sequence[ContextProvider]] = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -84,6 +96,11 @@ class ReActLoop:
         self.max_tool_retries = max_tool_retries
         self.loop_detection = loop_detection
         self.loop_same_call_limit = loop_same_call_limit
+        self.agent_name = agent_name
+        self.memory_manager = memory_manager
+        self.memory_namespace = memory_namespace
+        self.memory_subject_id = memory_subject_id
+        self.context_providers = list(context_providers or [])
         self._dispatcher = ToolDispatcher(tools, max_retries=max_tool_retries)
         self._graph = self._build_graph()
 
@@ -122,35 +139,113 @@ class ReActLoop:
         """Run the agent to completion on ``task`` and return an :class:`AgentResult`."""
         ctx = ExecutionContext(max_steps=self.max_steps, max_tokens=self.max_tokens)
         ctx.add_message("system", self.system_prompt)
+        for provider in self.context_providers:
+            for message in provider.prepare(task):
+                role = str(message.get("role", "system"))
+                content = str(message.get("content", ""))
+                if content:
+                    ctx.add_message(role, content)
         ctx.add_message("user", task)
 
-        state: Dict[str, Any] = {
-            "ctx": ctx,
-            "loop": self,
-            "__cancellation_event__": cancellation_event,
-        }
-        executor = self._graph.compile()
-        state = executor(state)
+        started = time.perf_counter()
+        with bind_log_context(run_id=ctx.run_id, agent_name=self.agent_name):
+            log_event(
+                logger,
+                logging.INFO,
+                "agent.run.started",
+                task_chars=len(task),
+                max_steps=self.max_steps,
+                max_tokens=self.max_tokens,
+                tool_count=len(self.tools),
+            )
+            try:
+                state: Dict[str, Any] = {
+                    "ctx": ctx,
+                    "loop": self,
+                    "__cancellation_event__": cancellation_event,
+                }
+                executor = self._graph.compile()
+                state = executor(state)
 
-        answer: Optional[str] = state.get("__answer__")
-        stop_reason: str = state.get("__stop_reason__", "finished")
+                answer: Optional[str] = state.get("__answer__")
+                stop_reason: str = state.get("__stop_reason__", "finished")
 
-        if answer is None:
-            answer = self._force_finish(ctx)
-            if stop_reason == "finished":
-                stop_reason = "no_answer"
+                if answer is None:
+                    answer = self._force_finish(ctx)
+                    if stop_reason == "finished":
+                        stop_reason = "no_answer"
 
-        if self.long_term is not None:
-            self.long_term.add(f"Task: {task}\nAnswer: {answer}", {"type": "task"})
+                result = AgentResult(
+                    answer=answer,
+                    success=stop_reason in ("finished",),
+                    steps=len(ctx.steps),
+                    tokens=ctx.tokens_used,
+                    stop_reason=stop_reason,
+                    trajectory=ctx.trajectory(),
+                )
+                self._record_memory_event(task, result, ctx)
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "agent.run.completed",
+                    success=result.success,
+                    stop_reason=result.stop_reason,
+                    steps=result.steps,
+                    tokens=result.tokens,
+                    answer_chars=len(result.answer),
+                    elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+                )
+                return result
+            except Exception:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "agent.run.failed",
+                    elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+                    exc_info=True,
+                )
+                raise
 
-        return AgentResult(
-            answer=answer,
-            success=stop_reason in ("finished",),
-            steps=len(ctx.steps),
-            tokens=ctx.tokens_used,
-            stop_reason=stop_reason,
-            trajectory=ctx.trajectory(),
-        )
+    def _record_memory_event(
+        self,
+        task: str,
+        result: AgentResult,
+        ctx: ExecutionContext,
+    ) -> None:
+        """Offer a completed run to policy-controlled memory without risking the run."""
+
+        if self.memory_manager is None:
+            return
+        try:
+            stored = self.memory_manager.on_run_completed(
+                RunCompletedEvent(
+                    run_id=ctx.run_id,
+                    task=task,
+                    answer=result.answer,
+                    success=result.success,
+                    stop_reason=result.stop_reason,
+                    messages=list(ctx.messages),
+                    trajectory=result.trajectory,
+                    namespace=self.memory_namespace,
+                    subject_id=self.memory_subject_id,
+                )
+            )
+            log_event(
+                logger,
+                logging.INFO,
+                "memory.run.processed",
+                candidate_stored_count=len(stored),
+            )
+        except Exception:
+            # Durable memory is best-effort here. Critical business writes should
+            # use an application outbox rather than making answer delivery depend
+            # on an embedding service or vector index.
+            log_event(
+                logger,
+                logging.WARNING,
+                "memory.run.failed",
+                exc_info=True,
+            )
 
     # -- graph nodes --------------------------------------------------------
     def _think_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -189,7 +284,39 @@ class ReActLoop:
                 ctx.state.get("tokens_saved_by_compression", 0) + saved
             )
 
-        response = self.llm.chat(managed, tools=self.tools.schemas())
+        llm_started = time.perf_counter()
+        log_event(
+            logger,
+            logging.DEBUG,
+            "llm.call.started",
+            step=step.index,
+            message_count=len(managed),
+            tool_count=len(self.tools),
+        )
+        try:
+            response = self.llm.chat(managed, tools=self.tools.schemas())
+        except Exception:
+            log_event(
+                logger,
+                logging.ERROR,
+                "llm.call.failed",
+                step=step.index,
+                elapsed_ms=round((time.perf_counter() - llm_started) * 1000, 2),
+                exc_info=True,
+            )
+            raise
+        log_event(
+            logger,
+            logging.INFO,
+            "llm.call.completed",
+            step=step.index,
+            wants_tool=response.wants_tool,
+            tool_call_count=len(response.tool_calls),
+            prompt_tokens=response.usage.prompt_tokens,
+            completion_tokens=response.usage.completion_tokens,
+            total_tokens=response.usage.total_tokens,
+            elapsed_ms=round((time.perf_counter() - llm_started) * 1000, 2),
+        )
         ctx.add_tokens(response.usage.total_tokens)
 
         if response.wants_tool:

@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..llm import BaseLLM, estimate_tokens
+from ..memory.embeddings import EmbeddingProvider, LLMEmbeddingProvider
 from .store import BaseVectorStore, NumPyVectorStore
 
 
@@ -115,10 +116,17 @@ class LongTermMemory:
 
     def __init__(
         self,
-        llm: BaseLLM,
+        llm: Optional[BaseLLM] = None,
         vector_store: Optional[BaseVectorStore] = None,
+        *,
+        embedding_provider: Optional[EmbeddingProvider] = None,
     ) -> None:
-        self._llm = llm
+        if embedding_provider is None:
+            if llm is None:
+                raise ValueError("LongTermMemory requires an embedding_provider.")
+            embedding_provider = LLMEmbeddingProvider(llm)
+        self._llm = llm  # backward-compatible attribute; no longer used directly
+        self._embedding_provider = embedding_provider
         self._store = vector_store if vector_store is not None else NumPyVectorStore()
 
     @property
@@ -131,12 +139,12 @@ class LongTermMemory:
 
     def add(self, text: str, metadata: Optional[Dict[str, Any]] = None) -> str:
         """Embed ``text`` and persist it. Returns the record id."""
-        embedding = self._llm.embed(text)
+        embedding = self._embedding_provider.embed_documents([text])[0]
         return self._store.add(text, embedding, metadata)
 
     def search(self, query: str, k: int = 3) -> List[Tuple[str, float]]:
         """Return up to ``k`` ``(text, score)`` pairs ranked by cosine similarity."""
-        embedding = self._llm.embed(query)
+        embedding = self._embedding_provider.embed_query(query)
         results = self._store.search(embedding, k)
         # Convert (id, text, score) -> (text, score) for backward compatibility.
         return [(text, score) for _, text, score in results]

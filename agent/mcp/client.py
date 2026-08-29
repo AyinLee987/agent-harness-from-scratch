@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
+import time
 from concurrent.futures import Future, TimeoutError as FutureTimeout
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any, Callable, Dict, List, Optional
@@ -14,9 +16,11 @@ from mcp.client.streamable_http import streamable_http_client
 from .config import MCPServerConfig
 from .errors import MCPConnectionError, MCPManagerClosedError, MCPToolCallError
 from .tool import MCPTool, format_mcp_result
+from ..observability import get_logger, log_event
 
 
 ClientFactory = Callable[[MCPServerConfig], Any]
+logger = get_logger(__name__)
 
 
 def _exception_details(exc: BaseException) -> str:
@@ -103,17 +107,43 @@ class MCPManager:
             raise MCPManagerClosedError("MCP manager is closed.")
         if self._connected:
             return self.tools()
+        started = time.perf_counter()
+        log_event(
+            logger,
+            logging.INFO,
+            "mcp.connect.started",
+            server_names=[config.name for config in self.configs],
+            server_count=len(self.configs),
+        )
         self._start_worker()
         timeout = sum(config.connect_timeout for config in self.configs) + 5.0
         try:
             discovered = self._submit("connect", None, timeout)
         except Exception as exc:
+            log_event(
+                logger,
+                logging.ERROR,
+                "mcp.connect.failed",
+                server_names=[config.name for config in self.configs],
+                error_type=type(exc).__name__,
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+                exc_info=True,
+            )
             self.close()
             if isinstance(exc, MCPConnectionError):
                 raise
             raise MCPConnectionError(f"Could not connect MCP servers: {exc}") from exc
         self._tools = discovered
         self._connected = True
+        log_event(
+            logger,
+            logging.INFO,
+            "mcp.connect.completed",
+            server_names=[config.name for config in self.configs],
+            tool_count=len(discovered),
+            tool_names=[tool.name for tool in discovered],
+            elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+        )
         return self.tools()
 
     def tools(self) -> List[MCPTool]:
@@ -132,19 +162,69 @@ class MCPManager:
         if config is None:
             raise MCPToolCallError(f"Unknown MCP server: {server_name!r}.")
         payload = (server_name, tool_name, dict(arguments))
+        started = time.perf_counter()
+        qualified_name = f"{server_name}__{tool_name}"
+        log_event(
+            logger,
+            logging.INFO,
+            "mcp.tool.started",
+            server_name=server_name,
+            tool_name=qualified_name,
+            argument_keys=sorted(arguments.keys()),
+        )
         try:
             result = self._submit("call", payload, config.call_timeout + 1.0)
         except FutureTimeout as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "mcp.tool.failed",
+                server_name=server_name,
+                tool_name=qualified_name,
+                error_class="timeout",
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+            )
             raise MCPToolCallError(
-                f"MCP tool {server_name}__{tool_name} timed out."
+                f"MCP tool {qualified_name} timed out."
             ) from exc
         except MCPToolCallError:
+            log_event(
+                logger,
+                logging.WARNING,
+                "mcp.tool.failed",
+                server_name=server_name,
+                tool_name=qualified_name,
+                error_class="classified",
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+                exc_info=True,
+            )
             raise
         except Exception as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "mcp.tool.failed",
+                server_name=server_name,
+                tool_name=qualified_name,
+                error_class="unexpected",
+                error_type=type(exc).__name__,
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+                exc_info=True,
+            )
             raise MCPToolCallError(
-                f"MCP tool {server_name}__{tool_name} failed: {exc}"
+                f"MCP tool {qualified_name} failed: {exc}"
             ) from exc
-        return format_mcp_result(result, config.max_output_chars)
+        formatted = format_mcp_result(result, config.max_output_chars)
+        log_event(
+            logger,
+            logging.INFO,
+            "mcp.tool.completed",
+            server_name=server_name,
+            tool_name=qualified_name,
+            output_chars=len(formatted),
+            elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+        )
+        return formatted
 
     def close(self) -> None:
         if self._closed:
@@ -157,6 +237,7 @@ class MCPManager:
                 self._thread.join(timeout=5.0)
         self._connected = False
         self._closed = True
+        log_event(logger, logging.INFO, "mcp.closed")
 
     def _start_worker(self) -> None:
         if self._thread is not None:

@@ -21,6 +21,7 @@ Public surface:
 
 from .agent import AgentResult, ReActAgent
 from .compression import CompressionResult, ContextCompressor
+from .context import ContextProvider
 from .errors import (
     FatalToolError,
     RecoverableToolError,
@@ -37,6 +38,37 @@ from .llm import (
     ToolCall,
     Usage,
 )
+from .local_tools import (
+    ListFilesTool, LocalToolConfig, ReadFileTool, RunCommandTool, WriteFileTool,
+    create_local_tools,
+)
+from .memory import (
+    DefaultMemoryPolicy,
+    EmbeddingProvider,
+    ExplicitRequestMemoryExtractor,
+    InMemoryMemoryRepository,
+    InMemorySessionStore,
+    InMemoryVectorIndex,
+    LLMEmbeddingProvider,
+    MemoryCandidate,
+    MemoryConfigurationError,
+    MemoryDecision,
+    MemoryError,
+    MemoryKind,
+    MemoryManager,
+    MemoryNotFoundError,
+    MemoryProtectedError,
+    MemoryRecord,
+    MemorySearchResult,
+    MemoryStatus,
+    NoopMemoryExtractor,
+    OpenAICompatibleEmbeddingProvider,
+    RetentionPolicy,
+    RunCompletedEvent,
+    SQLiteMemoryRepository,
+    Sensitivity,
+    SummarySnapshot,
+)
 from .multi_agent import (
     AgentRegistry,
     AgentSpec,
@@ -48,12 +80,31 @@ from .multi_agent import (
     TaskStatus,
     create_leader_tools,
 )
+from .observability import (
+    JsonFormatter,
+    RequestLoggingMiddleware,
+    TextFormatter,
+    bind_log_context,
+    configure_logging,
+    current_log_context,
+    get_logger,
+    log_event,
+    sanitize,
+)
+from .rag import (
+    BM25Retriever, CallableReranker, Chunk, Citation, DenseRetriever, Document,
+    DocumentStatus, Evidence, EvidenceBundle, EvidenceConflict, EvidenceStatus,
+    HeuristicReranker, InMemoryRAGRepository, MedicalParentChildChunker,
+    MedicalQueryPlanner, RAGConfig, RAGContextProvider, RAGIngestionService,
+    RAGPipeline, RetrievalFilters, SQLiteRAGRepository, create_rag_search_tool,
+    format_evidence_context,
+)
 from .safety import ScanResult, ToolOutputGuard
 from .state import (
     BaseVectorStore,
     ExecutionContext,
     LongTermMemory,
-    MemoryRecord,
+    MemoryRecord as LegacyMemoryRecord,
     NumPyVectorStore,
     ShortTermMemory,
     SQLiteVectorStore,
@@ -83,6 +134,7 @@ __all__ = [
     # Agent
     "ReActAgent",
     "AgentResult",
+    "ContextProvider",
     # Trigger layer
     "StateGraph",
     "ReActLoop",
@@ -106,6 +158,51 @@ __all__ = [
     "SubagentTask",
     "TaskStatus",
     "create_leader_tools",
+    # Durable memory
+    "MemoryManager",
+    "MemoryCandidate",
+    "MemoryRecord",
+    "LegacyMemoryRecord",
+    "MemorySearchResult",
+    "MemoryKind",
+    "MemoryStatus",
+    "MemoryDecision",
+    "RetentionPolicy",
+    "Sensitivity",
+    "RunCompletedEvent",
+    "EmbeddingProvider",
+    "LLMEmbeddingProvider",
+    "InMemoryMemoryRepository",
+    "SQLiteMemoryRepository",
+    "InMemoryVectorIndex",
+    "InMemorySessionStore",
+    "DefaultMemoryPolicy",
+    "NoopMemoryExtractor",
+    "OpenAICompatibleEmbeddingProvider",
+    "ExplicitRequestMemoryExtractor",
+    "SummarySnapshot",
+    "MemoryError",
+    "MemoryConfigurationError",
+    "MemoryNotFoundError",
+    "MemoryProtectedError",
+    # RAG
+    "Document", "DocumentStatus", "Chunk", "Citation", "Evidence",
+    "EvidenceBundle", "EvidenceConflict", "EvidenceStatus", "RetrievalFilters",
+    "MedicalParentChildChunker", "MedicalQueryPlanner", "RAGIngestionService",
+    "InMemoryRAGRepository", "SQLiteRAGRepository", "BM25Retriever",
+    "DenseRetriever", "HeuristicReranker", "CallableReranker", "RAGConfig",
+    "RAGPipeline", "RAGContextProvider", "create_rag_search_tool",
+    "format_evidence_context",
+    # Observability
+    "configure_logging",
+    "bind_log_context",
+    "current_log_context",
+    "get_logger",
+    "log_event",
+    "sanitize",
+    "JsonFormatter",
+    "TextFormatter",
+    "RequestLoggingMiddleware",
     # State layer
     "ExecutionContext",
     "Step",
@@ -124,6 +221,9 @@ __all__ = [
     "BailianLLM",
     "ToolCall",
     "Usage",
+    # Local workspace tools
+    "LocalToolConfig", "ReadFileTool", "WriteFileTool", "ListFilesTool",
+    "RunCommandTool", "create_local_tools",
     # Compression & safety
     "ContextCompressor",
     "CompressionResult",

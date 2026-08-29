@@ -31,6 +31,7 @@ htmlcov/
 # Eval output dumps
 *.eval.json
 results.json
+logs/
 
 # Editor / OS
 .idea/

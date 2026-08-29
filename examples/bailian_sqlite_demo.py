@@ -11,7 +11,7 @@ Run it directly::
 
 What this demonstrates:
     1. SQLiteVectorStore persists embeddings to disk (survives process restart).
-    2. The agent auto-memorizes every task+answer pair in long-term memory.
+    2. The application explicitly chooses which successful outcomes to remember.
     3. Vector recall: semantic search returns relevant past memories.
     4. Run it twice — second run shows memories loaded from disk.
 
@@ -21,7 +21,7 @@ Memory persistence flow::
       │
       ├─ think → act → observe (normal ReAct loop)
       ├─ answer: "391"
-      └─ long_term.add("Task: What is 23 times 17?\\nAnswer: 391")
+      └─ application policy approves an explicit long_term.add(...)
               │
               └─ SQLiteVectorStore.add()
                       │
@@ -160,7 +160,7 @@ def main() -> None:
         for rec in existing:
             print(f"  [{rec.id}] {rec.text[:120]}")
 
-    # ── Step 2: Run queries — agent auto-memorizes every task+answer ─────
+    # ── Step 2: Run queries; explicitly persist approved demo outcomes ──
     queries = [
         "What is 23 times 17?",
         "What is the result of 144 divided by 12?",
@@ -174,6 +174,13 @@ def main() -> None:
         print(f"    ANSWER: {result.answer}")
         print(f"    (steps={result.steps}, tokens={result.tokens}, "
               f"stop={result.stop_reason})")
+        if result.success:
+            # Demo-only allow-list policy. ReActAgent itself never auto-persists
+            # model answers; production code should use MemoryManager policies.
+            agent.long_term.add(
+                f"Verified demo outcome: {q} -> {result.answer}",
+                {"source_type": "explicit_demo_policy"},
+            )
 
     # ── Step 3: Show accumulated knowledge ───────────────────────────────
     print(f"\n[memory] Total records in SQLite: {len(agent.long_term)}")

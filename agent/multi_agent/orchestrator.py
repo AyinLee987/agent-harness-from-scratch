@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
 import threading
@@ -15,6 +16,7 @@ from typing import Dict, Iterator, List, Optional, Sequence
 
 from ..agent import ReActAgent
 from ..errors import FatalToolError, RecoverableToolError
+from ..observability import bind_log_context, get_logger, log_event
 from ..tools import BaseTool
 from .models import (
     TERMINAL_TASK_STATUSES,
@@ -25,6 +27,8 @@ from .models import (
     TaskStatus,
 )
 from .registry import AgentRegistry
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -118,11 +122,19 @@ class MultiAgentOrchestrator:
         with self._condition:
             self._roots[root_run_id] = _RootState(root_run_id=root_run_id)
         token = self._active_root.set(root_run_id)
-        try:
-            yield root_run_id
-        finally:
-            self._active_root.reset(token)
-            self._close_root(root_run_id)
+        with bind_log_context(root_run_id=root_run_id, agent_name="leader"):
+            log_event(logger, logging.INFO, "multi_agent.root.started")
+            try:
+                yield root_run_id
+            finally:
+                self._close_root(root_run_id)
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "multi_agent.root.completed",
+                    subagent_count=len(self.tasks_for_run(root_run_id)),
+                )
+                self._active_root.reset(token)
 
     def spawn_subagent(self, role: str, task: str) -> Dict[str, object]:
         """Start a Worker and return immediately with a task handle."""
@@ -172,6 +184,15 @@ class MultiAgentOrchestrator:
             root.fingerprints[fingerprint] += 1
             record.future = self._executor.submit(self._execute_task, task_id)
 
+        log_event(
+            logger,
+            logging.INFO,
+            "subagent.dispatched",
+            task_id=task_id,
+            agent_name=role,
+            instruction_chars=len(instruction),
+        )
+
         return {
             "task_id": task_id,
             "agent_name": role,
@@ -199,6 +220,7 @@ class MultiAgentOrchestrator:
             raise RecoverableToolError("timeout_seconds must be positive.")
 
         ids = [str(item) for item in task_ids]
+        wait_started = time.monotonic()
         deadline = time.monotonic() + timeout_seconds
         with self._condition:
             for task_id in ids:
@@ -206,6 +228,13 @@ class MultiAgentOrchestrator:
             while True:
                 records = [self._owned_task(root_run_id, item) for item in ids]
                 if all(item.status in TERMINAL_TASK_STATUSES for item in records):
+                    log_event(
+                        logger,
+                        logging.INFO,
+                        "subagent.wait.completed",
+                        task_ids=ids,
+                        elapsed_ms=round((time.monotonic() - wait_started) * 1000, 2),
+                    )
                     return [self._result_payload(item) for item in records]
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -214,6 +243,14 @@ class MultiAgentOrchestrator:
                         for item in records
                         if item.status not in TERMINAL_TASK_STATUSES
                     ]
+                    log_event(
+                        logger,
+                        logging.WARNING,
+                        "subagent.wait.timed_out",
+                        task_ids=ids,
+                        pending_task_ids=pending,
+                        timeout_seconds=timeout_seconds,
+                    )
                     raise RecoverableToolError(
                         f"Timed out waiting for subagents: {', '.join(pending)}."
                     )
@@ -267,10 +304,22 @@ class MultiAgentOrchestrator:
             record.started_at = time.time()
             self._condition.notify_all()
 
+        with bind_log_context(
+            root_run_id=record.root_run_id,
+            task_id=record.task_id,
+            agent_name=record.agent_name,
+        ):
+            self._execute_task_in_context(record)
+
+    def _execute_task_in_context(self, record: _TaskRecord) -> None:
+        """Execute a Worker with correlation context propagated into its thread."""
+
+        log_event(logger, logging.INFO, "subagent.started")
+
         timer = threading.Timer(
             self.budget.subagent_timeout_seconds,
             self._timeout_task,
-            args=(task_id,),
+            args=(record.task_id,),
         )
         timer.daemon = True
         timer.start()
@@ -289,6 +338,13 @@ class MultiAgentOrchestrator:
                 tokens=outcome.tokens,
             )
         except Exception as exc:
+            log_event(
+                logger,
+                logging.ERROR,
+                "subagent.failed",
+                error_type=type(exc).__name__,
+                exc_info=True,
+            )
             result = SubagentResult(
                 task_id=record.task_id,
                 agent_name=record.agent_name,
@@ -301,7 +357,7 @@ class MultiAgentOrchestrator:
             timer.cancel()
 
         with self._condition:
-            record = self._tasks[task_id]
+            record = self._tasks[record.task_id]
             if record.status == TaskStatus.CANCELLED:
                 self._condition.notify_all()
                 return
@@ -325,6 +381,20 @@ class MultiAgentOrchestrator:
                 )
             record.finished_at = time.time()
             self._condition.notify_all()
+            log_event(
+                logger,
+                logging.INFO if record.status == TaskStatus.SUCCEEDED else logging.WARNING,
+                "subagent.completed",
+                status=record.status.value,
+                success=record.result.success if record.result else False,
+                steps=record.result.steps if record.result else 0,
+                tokens=record.result.tokens if record.result else 0,
+                elapsed_ms=round(
+                    ((record.finished_at or time.time()) - (record.started_at or record.created_at))
+                    * 1000,
+                    2,
+                ),
+            )
 
     def _timeout_task(self, task_id: str) -> None:
         with self._condition:
@@ -337,6 +407,13 @@ class MultiAgentOrchestrator:
             record.finished_at = time.time()
             record.result = self._normalized_result(record)
             self._condition.notify_all()
+            log_event(
+                logger,
+                logging.WARNING,
+                "subagent.timed_out",
+                task_id=record.task_id,
+                agent_name=record.agent_name,
+            )
 
     def _close_root(self, root_run_id: str) -> None:
         with self._condition:
@@ -360,6 +437,14 @@ class MultiAgentOrchestrator:
         record.finished_at = time.time()
         record.result = self._normalized_result(record)
         self._condition.notify_all()
+        log_event(
+            logger,
+            logging.INFO,
+            "subagent.cancelled",
+            task_id=record.task_id,
+            agent_name=record.agent_name,
+            status=status.value,
+        )
 
     def _active_root_id(self) -> str:
         if self._closed:

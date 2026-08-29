@@ -255,12 +255,12 @@ token total are hard caps. A model that keeps calling tools, or keeps emitting
 malformed calls, hits the ceiling and the run ends with a graceful "stopped"
 answer plus the last useful observation — never an infinite spend.
 
-**How memory is layered.** Short-term memory keeps a sliding window of recent
-messages and summarizes the overflow so the prompt stays inside the model's
-budget. Long-term memory is a separate concern: an embedding store that recalls
-relevant facts from *past* runs and primes the system prompt. Splitting them
-mirrors how production agents separate "what's in this conversation" from "what
-we've learned over time."
+**How memory is layered.** `ExecutionContext` owns one run, short-term memory
+manages its prompt window, and `SessionMemoryStore` is the boundary for a future
+conversation backend. Durable memory is policy-controlled: completed model
+answers are never persisted implicitly. `MemoryRepository` is the source of
+truth while the vector index is derived and rebuildable. Authoritative domain
+knowledge belongs in a separate RAG corpus, not user memory.
 
 **Why compress context.** Token cost and latency in agent loops are dominated by
 re-sending history and tool outputs. Compressing the input before the model call
@@ -301,6 +301,14 @@ control, and request queuing for production deployments.
 
 ```
 agent/
+  memory/            ← Policy-controlled durable memory
+    models.py        candidates, records, versions, retention states
+    manager.py       read/write/lifecycle coordinator
+    embeddings.py    chat-independent EmbeddingProvider
+    repository.py    in-memory + SQLite source-of-truth repositories
+    index.py         replaceable derived vector index
+    policy.py        fail-closed extraction and persistence policy
+    session.py       conversation-store interface
   trigger/           ← Trigger Layer (when / how)
     gateway.py       🆕 Unified entry: rate limiting + concurrency + queuing
     graph.py         Generic StateGraph engine (pattern-agnostic)
@@ -411,6 +419,172 @@ Leader. Delegation is not a separate mode: `spawn_subagent` and the other
 lifecycle operations are simply part of the Leader's tool list. The model uses
 them only when the task benefits from Worker specialization or parallelism.
 The built-in server registers `researcher` and `analyst` Worker roles.
+
+## Policy-controlled memory
+
+Passing legacy `LongTermMemory` to an agent no longer auto-saves every task and
+model answer. New code should use `MemoryManager`; its safe default extractor
+stores nothing.
+
+```python
+from agent import (
+    ExplicitRequestMemoryExtractor, LLMEmbeddingProvider,
+    MemoryManager, MockLLM, ReActAgent, ToolRegistry,
+)
+
+llm = MockLLM()
+memory = MemoryManager(
+    embedding_provider=LLMEmbeddingProvider(llm, model_id="demo:hash-v1"),
+    extractor=ExplicitRequestMemoryExtractor(),
+)
+tools = ToolRegistry([memory.as_search_tool(
+    namespace="user-memory", subject_id="user-123",
+)])
+agent = ReActAgent(
+    llm=llm,
+    tools=tools,
+    memory_manager=memory,
+    memory_namespace="user-memory",
+    memory_subject_id="user-123",
+)
+```
+
+Normal explicit memories may persist; health and secret candidates enter
+`REQUIRE_CONFIRMATION`. Model output and failed runs are skipped. Replacements
+create a new version and mark the old record `SUPERSEDED`, retaining history
+while removing it from recall.
+
+Lifecycle states are `ACTIVE`, `SUPERSEDED`, `EXPIRED`, `TOMBSTONED`, and
+`QUARANTINED`. Only `EPHEMERAL` and `TTL` records auto-expire. `PINNED`,
+`UNTIL_REVIEW`, `UNTIL_SUPERSEDED`, and `EXPLICIT_DELETE_ONLY` records are not
+removed by scheduled expiry. Deletion is two-phase: tombstone and de-index
+immediately, then physically purge after an application-defined grace period.
+Pinned deletion requires explicit authorization.
+
+`EmbeddingProvider` is separate from the chat model and records its model id and
+dimension on each memory. The old `LongTermMemory(llm)` constructor remains as a
+compatibility adapter; production code should configure a dedicated embedding
+provider and rebuild/version indexes when changing models.
+
+## Structured logging
+
+The FastAPI server configures structured logging automatically. Every request
+gets an `X-Request-ID` response header, and the same id is attached to Leader,
+Worker, LLM, tool, and MCP events. Multi-agent events additionally carry
+`root_run_id`, `run_id`, `task_id`, and `agent_name` where applicable.
+
+```dotenv
+AGENT_LOG_LEVEL=INFO          # DEBUG, INFO, WARNING, ERROR
+AGENT_LOG_FORMAT=json         # json or text
+AGENT_LOG_FILE=logs/agent.log # optional rotating file; stderr is always enabled
+AGENT_LOG_MAX_BYTES=10485760
+AGENT_LOG_BACKUP_COUNT=5
+```
+
+Library users can initialize the same setup with `configure_logging()`. Stable
+event names include `http.request.*`, `agent.run.*`, `llm.call.*`,
+`tool.call.*`, `mcp.*`, and `subagent.*`. Logs record sizes, argument key names,
+token counts, statuses, and timings—not prompt text, tool arguments, model
+answers, or tool output. Known credential fields such as `api_key`,
+`authorization`, `password`, and access tokens are redacted automatically.
+
+## Governed hybrid RAG
+
+The optional `agent.rag` package is a separate knowledge layer rather than a
+form of user memory. It provides:
+
+- structure-first Chinese medical parent/child chunks, including table-header
+  carry-over and protected recommendation, evidence-grade, contraindication,
+  and dose units;
+- staged ingestion, checksum deduplication, atomic publication, version
+  supersession, and SQLite persistence;
+- BM25 plus dedicated dense embeddings, reciprocal-rank fusion, a replaceable
+  reranker, metadata filters, and parent-context hydration;
+- traceable evidence IDs and source citations, plus insufficient, stale,
+  conflicting, degraded, and retrieval-failed states;
+- mandatory retrieval before the Leader's first model call and a recoverable
+  `medical_evidence_search` tool for follow-up searches.
+
+It is disabled by default. To enable it, copy UTF-8 Markdown or text documents
+into `data/rag_sources`, then configure:
+
+```dotenv
+ENABLE_RAG=1
+RAG_SOURCE_DIR=data/rag_sources
+RAG_DB_PATH=data/rag.sqlite
+RAG_EMBEDDING_MODEL=text-embedding-3-small
+RAG_EMBEDDING_API_KEY=...
+RAG_EMBEDDING_BASE_URL=https://api.openai.com/v1
+```
+
+The embedding endpoint is deliberately independent from the chat model. In a
+medical deployment, replace `HeuristicReranker` with a validated cross-encoder,
+set explicit evidence-age and multi-document policies through `RAGConfig`, and
+ingest reviewed source metadata rather than relying on filenames alone.
+
+Corpus writes have separate management entry points. For local or batch import:
+
+```bash
+python -m rag_ingest ./medical-guidelines \
+  --publisher "Chinese Medical Association" \
+  --document-type guideline --jurisdiction CN --version 2026
+```
+
+For an application upload, set a secret `RAG_ADMIN_TOKEN` and call:
+
+```http
+POST /api/rag/documents
+X-RAG-Admin-Token: your-secret
+Content-Type: application/json
+
+{
+  "logical_id": "guidelines/hypertension",
+  "title": "Hypertension guideline",
+  "content": "# Recommendation\n...",
+  "publisher": "Reviewed publisher",
+  "document_type": "guideline",
+  "jurisdiction": "CN",
+  "version": "2026"
+}
+```
+
+The API accepts document text rather than a server-side file path, preventing
+remote callers from reading arbitrary host files. It is disabled without the
+admin token, enforces `RAG_MAX_DOCUMENT_BYTES`, serializes publication for
+consistent versioning, and never publishes a document if chunking or indexing
+fails.
+
+## Local workspace and CLI tools
+
+Local capabilities are ordinary Leader tools, so the existing `/api/run` and
+`/api/stream` flows need no special endpoint. They are disabled by default:
+
+```dotenv
+ENABLE_LOCAL_FILE_TOOLS=1
+AGENT_WORKSPACE_ROOT=C:\work\my-project
+
+# Stronger capability: only enable for a trusted local user.
+ENABLE_LOCAL_CLI=1
+AGENT_CLI_ALLOWED_COMMANDS=git,rg,python,python.exe,pytest
+AGENT_CLI_TIMEOUT_SECONDS=30
+AGENT_CLI_MAX_OUTPUT_BYTES=262144
+```
+
+When enabled, the Leader receives:
+
+- `read_file(path, start_line, end_line)` for bounded UTF-8 reads;
+- `write_file(path, content, overwrite, create_parent_dirs, expected_sha256)`
+  for atomic writes with optional optimistic concurrency checks;
+- `list_files(path, pattern, max_results)` for workspace-scoped discovery;
+- `run_command(argv, cwd, timeout_seconds)` for a single allowlisted executable.
+
+File tools resolve symlinks and reject paths outside `AGENT_WORKSPACE_ROOT`.
+`run_command` does not invoke a shell, so pipes, redirection, shell built-ins,
+and command chaining are unavailable. It caps runtime and captured output and
+passes a reduced environment that excludes API keys. A permitted executable
+can still access whatever the operating-system user can access, so the CLI tool
+is not an OS sandbox; for untrusted users, run the entire server in a container
+or restricted service account and leave `ENABLE_LOCAL_CLI=0`.
 
 ## License
 

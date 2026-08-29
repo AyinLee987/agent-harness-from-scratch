@@ -16,8 +16,11 @@ Endpoints
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
+import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator
 
@@ -31,6 +34,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
+from pydantic import Field
 
 from agent import (
     AgentRegistry,
@@ -40,13 +44,32 @@ from agent import (
     FatalToolError,
     MockLLM,
     MultiAgentOrchestrator,
+    LocalToolConfig,
+    BM25Retriever,
+    DenseRetriever,
+    MedicalParentChildChunker,
+    OpenAICompatibleEmbeddingProvider,
+    RAGContextProvider,
+    RAGIngestionService,
+    RAGPipeline,
+    SQLiteRAGRepository,
+    create_rag_search_tool,
+    create_local_tools,
     ReActAgent,
     RunBudget,
     ToolOutputGuard,
     ToolRegistry,
     ToolDispatcher,
+    RequestLoggingMiddleware,
+    bind_log_context,
+    configure_logging,
+    get_logger,
+    log_event,
     tool,
 )
+
+configure_logging()
+logger = get_logger("server")
 
 # ---------------------------------------------------------------------------
 # Tools (same three as examples/basic_tools.py)
@@ -125,6 +148,38 @@ def build_registry() -> ToolRegistry:
     registry = ToolRegistry([calculator, web_search])
     datetime_now.name = "datetime"
     registry.register(datetime_now)
+    file_tools_enabled = os.getenv("ENABLE_LOCAL_FILE_TOOLS", "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    cli_enabled = os.getenv("ENABLE_LOCAL_CLI", "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    if file_tools_enabled or cli_enabled:
+        allowed_commands = tuple(
+            item.strip() for item in os.getenv(
+                "AGENT_CLI_ALLOWED_COMMANDS", "git,rg,python,python.exe,pytest"
+            ).split(",") if item.strip()
+        )
+        config = LocalToolConfig(
+            workspace_root=os.getenv("AGENT_WORKSPACE_ROOT", str(_Path(__file__).parent)),
+            max_read_bytes=int(os.getenv("AGENT_FILE_MAX_READ_BYTES", str(2 * 1024 * 1024))),
+            max_write_bytes=int(os.getenv("AGENT_FILE_MAX_WRITE_BYTES", str(2 * 1024 * 1024))),
+            max_command_output_bytes=int(os.getenv("AGENT_CLI_MAX_OUTPUT_BYTES", str(256 * 1024))),
+            command_timeout_seconds=float(os.getenv("AGENT_CLI_TIMEOUT_SECONDS", "30")),
+            allowed_commands=allowed_commands,
+        )
+        registry.register_many(create_local_tools(
+            config, include_files=file_tools_enabled, include_cli=cli_enabled,
+        ))
+        log_event(
+            logger,
+            logging.INFO,
+            "local_tools.registered",
+            workspace_root=str(config.workspace_root),
+            file_tools_enabled=file_tools_enabled,
+            cli_enabled=cli_enabled,
+            allowed_command_count=len(allowed_commands),
+        )
     return registry
 
 
@@ -133,6 +188,9 @@ def build_registry() -> ToolRegistry:
 # ---------------------------------------------------------------------------
 REGISTRY = build_registry()
 MCP_MANAGER = None
+RAG_REPOSITORY = None
+RAG_PIPELINE = None
+RAG_INGESTION = None
 OUTPUT_GUARD = ToolOutputGuard()
 
 def _build_llm():
@@ -152,6 +210,50 @@ def _fetch_mcp_enabled() -> bool:
         "yes",
         "on",
     }
+
+
+def _enabled(name: str) -> bool:
+    return os.getenv(name, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _start_rag():
+    """Build the governed RAG runtime and ingest configured text sources."""
+    global RAG_REPOSITORY, RAG_PIPELINE, RAG_INGESTION
+    if not _enabled("ENABLE_RAG"):
+        return
+    model = os.getenv("RAG_EMBEDDING_MODEL") or os.getenv("OPENAI_EMBED_MODEL")
+    if not model:
+        raise RuntimeError("ENABLE_RAG=1 requires RAG_EMBEDDING_MODEL.")
+    api_key = os.getenv("RAG_EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY")
+    base_url = os.getenv("RAG_EMBEDDING_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+    repository_path = _Path(os.getenv("RAG_DB_PATH", "data/rag.sqlite"))
+    repository_path.parent.mkdir(parents=True, exist_ok=True)
+    repository = SQLiteRAGRepository(repository_path)
+    bm25 = BM25Retriever(repository)
+    dense = DenseRetriever(repository, OpenAICompatibleEmbeddingProvider(
+        model=model, api_key=api_key, base_url=base_url, provider_name="rag",
+    ))
+    bm25.rebuild()
+    dense.rebuild()
+    ingestion = RAGIngestionService(
+        repository, MedicalParentChildChunker(), [bm25, dense]
+    )
+    source_dir = _Path(os.getenv("RAG_SOURCE_DIR", "data/rag_sources"))
+    if source_dir.exists():
+        for path in sorted(source_dir.rglob("*")):
+            if path.is_file() and path.suffix.lower() in {".md", ".txt"}:
+                ingestion.ingest_text(
+                    logical_id=path.relative_to(source_dir).as_posix(),
+                    title=path.stem,
+                    content=path.read_text(encoding="utf-8"),
+                    source_url=path.resolve().as_uri(),
+                    publisher=os.getenv("RAG_DEFAULT_PUBLISHER", "local-corpus"),
+                    jurisdiction=os.getenv("RAG_DEFAULT_JURISDICTION", "CN"),
+                )
+    RAG_REPOSITORY = repository
+    RAG_PIPELINE = RAGPipeline(repository, bm25, dense)
+    RAG_INGESTION = ingestion
+    log_event(logger, logging.INFO, "rag.started", document_count=len(repository.list_documents()))
 
 
 LEADER_SYSTEM_PROMPT = (
@@ -178,9 +280,12 @@ def _build_leader_runtime(max_steps: int = 10):
         names = ["web_search"]
         if "fetch__fetch" in REGISTRY:
             names.append("fetch__fetch")
+        worker_tools = _copy_tools(*names)
+        if RAG_PIPELINE:
+            worker_tools.register(create_rag_search_tool(RAG_PIPELINE))
         return ReActAgent(
             llm=_build_llm(),
-            tools=_copy_tools(*names),
+            tools=worker_tools,
             system_prompt=(
                 "You are a research Worker. Investigate only the delegated task, "
                 "use available source tools when useful, and return a concise "
@@ -188,6 +293,7 @@ def _build_leader_runtime(max_steps: int = 10):
             ),
             output_guard=OUTPUT_GUARD,
             max_steps=max_steps,
+            agent_name="researcher",
         )
 
     def build_analyst() -> ReActAgent:
@@ -200,6 +306,7 @@ def _build_leader_runtime(max_steps: int = 10):
             ),
             output_guard=OUTPUT_GUARD,
             max_steps=max_steps,
+            agent_name="analyst",
         )
 
     workers.register(
@@ -217,6 +324,8 @@ def _build_leader_runtime(max_steps: int = 10):
     leader_registry = ToolRegistry(
         [REGISTRY.get(name) for name in REGISTRY.names() if REGISTRY.get(name)]
     )
+    if RAG_PIPELINE:
+        leader_registry.register(create_rag_search_tool(RAG_PIPELINE))
     leader_registry.register_many(orchestrator.leader_tools())
     leader = ReActAgent(
         llm=_build_llm(),
@@ -224,6 +333,8 @@ def _build_leader_runtime(max_steps: int = 10):
         system_prompt=LEADER_SYSTEM_PROMPT,
         output_guard=OUTPUT_GUARD,
         max_steps=max_steps,
+        agent_name="leader",
+        context_providers=[RAGContextProvider(RAG_PIPELINE)] if RAG_PIPELINE else None,
     )
     return orchestrator, leader
 
@@ -232,39 +343,41 @@ def _build_leader_runtime(max_steps: int = 10):
 async def lifespan(_app: FastAPI):
     """Connect explicitly enabled MCP servers and close them on shutdown."""
 
-    global MCP_MANAGER
-    if not _fetch_mcp_enabled():
-        yield
-        return
-
+    global MCP_MANAGER, RAG_REPOSITORY, RAG_PIPELINE, RAG_INGESTION
+    manager = None
     try:
-        from agent.mcp import MCPManager, MCPServerConfig, uv_tool_command
-    except ModuleNotFoundError as exc:
-        if exc.name == "mcp":
-            raise RuntimeError(
-                "Fetch MCP is enabled but the MCP SDK is missing. "
-                "Install dependencies with: python -m pip install -r requirements.txt"
-            ) from exc
-        raise
-
-    command, args = uv_tool_command("mcp-server-fetch")
-    fetch = MCPServerConfig.stdio(
-        name="fetch",
-        command=command,
-        args=args,
-        env={"PYTHONIOENCODING": "utf-8"},
-        connect_timeout=float(os.getenv("MCP_FETCH_CONNECT_TIMEOUT", "90")),
-        call_timeout=float(os.getenv("MCP_FETCH_CALL_TIMEOUT", "60")),
-    )
-    manager = MCPManager([fetch])
-    try:
-        tools = await asyncio.to_thread(manager.connect_all)
-        REGISTRY.register_many(tools)
-        MCP_MANAGER = manager
+        await asyncio.to_thread(_start_rag)
+        if _fetch_mcp_enabled():
+            try:
+                from agent.mcp import MCPManager, MCPServerConfig, uv_tool_command
+            except ModuleNotFoundError as exc:
+                if exc.name == "mcp":
+                    raise RuntimeError(
+                        "Fetch MCP is enabled but the MCP SDK is missing. "
+                        "Install dependencies with: python -m pip install -r requirements.txt"
+                    ) from exc
+                raise
+            command, args = uv_tool_command("mcp-server-fetch")
+            fetch = MCPServerConfig.stdio(
+                name="fetch", command=command, args=args,
+                env={"PYTHONIOENCODING": "utf-8"},
+                connect_timeout=float(os.getenv("MCP_FETCH_CONNECT_TIMEOUT", "90")),
+                call_timeout=float(os.getenv("MCP_FETCH_CALL_TIMEOUT", "60")),
+            )
+            manager = MCPManager([fetch])
+            tools = await asyncio.to_thread(manager.connect_all)
+            REGISTRY.register_many(tools)
+            MCP_MANAGER = manager
         yield
     finally:
-        await asyncio.to_thread(manager.close)
+        if manager is not None:
+            await asyncio.to_thread(manager.close)
         MCP_MANAGER = None
+        if RAG_REPOSITORY is not None:
+            await asyncio.to_thread(RAG_REPOSITORY.close)
+        RAG_REPOSITORY = None
+        RAG_PIPELINE = None
+        RAG_INGESTION = None
 
 
 # ---------------------------------------------------------------------------
@@ -283,12 +396,40 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestLoggingMiddleware)
 
 
 # -- Pydantic models -------------------------------------------------------
 class RunRequest(BaseModel):
     task: str
     max_steps: int = 10
+
+
+class RAGDocumentRequest(BaseModel):
+    logical_id: str = Field(min_length=1, max_length=300)
+    title: str = Field(min_length=1, max_length=500)
+    content: str = Field(min_length=1)
+    source_url: str = ""
+    publisher: str = "unknown"
+    document_type: str = "reference"
+    jurisdiction: str = ""
+    language: str = "zh-CN"
+    version: str = "1"
+    published_at: _dt | None = None
+    effective_at: _dt | None = None
+    reviewed_at: _dt | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RAGDocumentResponse(BaseModel):
+    document_id: str
+    logical_id: str
+    status: str
+    version: str
+    chunk_count: int
+    skipped: bool
+    supersedes_id: str | None = None
+    warnings: list[str]
 
 
 class RunResponse(BaseModel):
@@ -331,6 +472,64 @@ async def health():
     }
 
 
+@app.post("/api/rag/documents", response_model=RAGDocumentResponse, status_code=201)
+async def ingest_rag_document(payload: RAGDocumentRequest, request: Request):
+    """Validate, chunk, index, and atomically publish one corpus document."""
+    if RAG_INGESTION is None:
+        raise HTTPException(503, "RAG is disabled. Set ENABLE_RAG=1 and restart the server.")
+    expected_token = os.getenv("RAG_ADMIN_TOKEN", "")
+    supplied_token = request.headers.get("X-RAG-Admin-Token", "")
+    if not expected_token:
+        raise HTTPException(503, "Corpus writes are disabled until RAG_ADMIN_TOKEN is configured.")
+    if not hmac.compare_digest(supplied_token, expected_token):
+        raise HTTPException(401, "Invalid corpus administration token.")
+    maximum_bytes = int(os.getenv("RAG_MAX_DOCUMENT_BYTES", str(5 * 1024 * 1024)))
+    if len(payload.content.encode("utf-8")) > maximum_bytes:
+        raise HTTPException(413, f"Document exceeds the {maximum_bytes}-byte ingestion limit.")
+    dates = {
+        key: value for key, value in {
+            "published_at": payload.published_at,
+            "effective_at": payload.effective_at,
+            "reviewed_at": payload.reviewed_at,
+        }.items() if value is not None
+    }
+    try:
+        result = await asyncio.to_thread(
+            RAG_INGESTION.ingest_text,
+            logical_id=payload.logical_id,
+            title=payload.title,
+            content=payload.content,
+            source_url=payload.source_url,
+            publisher=payload.publisher,
+            document_type=payload.document_type,
+            jurisdiction=payload.jurisdiction,
+            language=payload.language,
+            version=payload.version,
+            metadata=payload.metadata,
+            **dates,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        log_event(logger, logging.ERROR, "rag.ingestion.failed", exc_info=True)
+        raise HTTPException(503, "Corpus indexing failed; the document was not published.") from exc
+    log_event(
+        logger, logging.INFO, "rag.ingestion.completed",
+        document_id=result.document.id, logical_id=result.document.logical_id,
+        chunk_count=len(result.chunks), skipped=result.skipped,
+    )
+    return RAGDocumentResponse(
+        document_id=result.document.id,
+        logical_id=result.document.logical_id,
+        status=result.document.status.value,
+        version=result.document.version,
+        chunk_count=len(result.chunks),
+        skipped=result.skipped,
+        supersedes_id=result.document.supersedes_id,
+        warnings=result.warnings,
+    )
+
+
 @app.get("/api/tools")
 async def list_tools():
     orchestrator, leader = _build_leader_runtime()
@@ -366,6 +565,10 @@ async def stream(task: str = Query(..., description="Task for the agent")):
 
         ctx = ExecutionContext(max_steps=agent.max_steps, max_tokens=agent.max_tokens)
         ctx.add_message("system", agent.system_prompt)
+        for provider in agent.context_providers:
+            for message in await asyncio.to_thread(provider.prepare, task):
+                if message.get("content"):
+                    ctx.add_message(str(message.get("role", "system")), str(message["content"]))
         ctx.add_message("user", task)
         dispatcher = ToolDispatcher(leader_registry)
         stop_reason = "max_steps"
@@ -373,24 +576,45 @@ async def stream(task: str = Query(..., description="Task for the agent")):
 
         try:
             with orchestrator.leader_scope() as root_run_id:
-                yield _sse("start", {
-                    "task": task,
-                    "tools": leader_registry.names(),
-                    "root_run_id": root_run_id,
-                })
+                with bind_log_context(run_id=ctx.run_id, agent_name="leader"):
+                    stream_started = time.perf_counter()
+                    log_event(
+                        logger,
+                        logging.INFO,
+                        "agent.stream.started",
+                        task_chars=len(task),
+                        max_steps=agent.max_steps,
+                        tool_count=len(leader_registry),
+                    )
+                    yield _sse("start", {
+                        "task": task,
+                        "tools": leader_registry.names(),
+                        "root_run_id": root_run_id,
+                    })
 
-                async for payload in _stream_leader_steps(
-                    task=task,
-                    agent=agent,
-                    llm=llm,
-                    registry=leader_registry,
-                    dispatcher=dispatcher,
-                    ctx=ctx,
-                ):
-                    if payload[0] == "__stop__":
-                        stop_reason = payload[1]["stop_reason"]
-                    else:
-                        yield _sse(payload[0], payload[1])
+                    async for payload in _stream_leader_steps(
+                        task=task,
+                        agent=agent,
+                        llm=llm,
+                        registry=leader_registry,
+                        dispatcher=dispatcher,
+                        ctx=ctx,
+                    ):
+                        if payload[0] == "__stop__":
+                            stop_reason = payload[1]["stop_reason"]
+                        else:
+                            yield _sse(payload[0], payload[1])
+
+                    log_event(
+                        logger,
+                        logging.INFO,
+                        "agent.stream.completed",
+                        success=stop_reason == "finished",
+                        stop_reason=stop_reason,
+                        steps=len(ctx.steps),
+                        tokens=ctx.tokens_used,
+                        elapsed_ms=round((time.perf_counter() - stream_started) * 1000, 2),
+                    )
 
             subagents = [
                 item.to_dict() for item in orchestrator.results_for_run(root_run_id)
@@ -431,17 +655,47 @@ async def _stream_leader_steps(*, task, agent, llm, registry, dispatcher, ctx):
         yield "think_start", {"step": step_idx}
         full_content = ""
         tool_calls = []
+        llm_started = time.perf_counter()
+        log_event(
+            logger,
+            logging.DEBUG,
+            "llm.stream.started",
+            step=step_idx,
+            message_count=len(ctx.messages),
+            tool_count=len(registry),
+        )
 
-        async for event in llm.astream(
-            agent.short_term.manage(ctx.messages),
-            tools=registry.schemas(),
-        ):
-            if event["type"] == "text":
-                full_content += event["data"]
-                yield "text", {"step": step_idx, "token": event["data"]}
-            elif event["type"] == "tool_call":
-                tool_calls.append(event["data"])
-                yield "tool_call", {"step": step_idx, "tool": event["data"]}
+        try:
+            async for event in llm.astream(
+                agent.short_term.manage(ctx.messages),
+                tools=registry.schemas(),
+            ):
+                if event["type"] == "text":
+                    full_content += event["data"]
+                    yield "text", {"step": step_idx, "token": event["data"]}
+                elif event["type"] == "tool_call":
+                    tool_calls.append(event["data"])
+                    yield "tool_call", {"step": step_idx, "tool": event["data"]}
+        except Exception:
+            log_event(
+                logger,
+                logging.ERROR,
+                "llm.stream.failed",
+                step=step_idx,
+                elapsed_ms=round((time.perf_counter() - llm_started) * 1000, 2),
+                exc_info=True,
+            )
+            raise
+
+        log_event(
+            logger,
+            logging.INFO,
+            "llm.stream.completed",
+            step=step_idx,
+            tool_call_count=len(tool_calls),
+            output_chars=len(full_content),
+            elapsed_ms=round((time.perf_counter() - llm_started) * 1000, 2),
+        )
 
         ctx.add_tokens(estimate_tokens_simple(full_content))
 
