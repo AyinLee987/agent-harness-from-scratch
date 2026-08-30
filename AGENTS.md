@@ -196,3 +196,10 @@ backend, a new provider, a new policy):
    `<THING>_DB_PATH` convention (see `RAG_DB_PATH`), defaulting to a real
    SQLite file under `data/`, not to in-memory — production should default
    to durable, tests should default to `InMemory*` or `:memory:`.
+
+## 11. Found a real bug? Log it in `BUGS.md`
+
+Root cause, how it was found, the fix, and the regression test that now
+guards it — same format the existing entries use. The point is that a
+defect already diagnosed here should never need rediscovering from scratch
+later; a quiet fix with no entry defeats that.
