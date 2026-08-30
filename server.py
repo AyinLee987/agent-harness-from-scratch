@@ -22,7 +22,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, List, Optional, Sequence
 
 from dotenv import load_dotenv
 
@@ -40,6 +40,7 @@ from agent import (
     AgentRegistry,
     AgentSpec,
     AgentResult,
+    ContextProvider,
     DeepSeekLLM,
     FatalToolError,
     MockLLM,
@@ -49,10 +50,14 @@ from agent import (
     DenseRetriever,
     MedicalParentChildChunker,
     OpenAICompatibleEmbeddingProvider,
+    InMemorySessionStore,
     RAGContextProvider,
     RAGIngestionService,
     RAGPipeline,
+    SessionContextProvider,
+    SessionMemoryStore,
     SQLiteRAGRepository,
+    SQLiteSessionStore,
     create_rag_search_tool,
     create_local_tools,
     ReActAgent,
@@ -192,6 +197,12 @@ RAG_REPOSITORY = None
 RAG_PIPELINE = None
 RAG_INGESTION = None
 OUTPUT_GUARD = ToolOutputGuard()
+# Swapped for a SQLiteSessionStore in lifespan() startup; kept as a
+# dependency-free default here so importing this module (e.g. from a test
+# that calls route functions directly, bypassing lifespan) never touches
+# disk — see AGENTS.md's rule on production defaulting to durable, tests to
+# in-memory.
+SESSION_STORE: SessionMemoryStore = InMemorySessionStore()
 
 def _build_llm():
     """Pick LLM: DeepSeek > OpenAI > MockLLM fallback."""
@@ -271,7 +282,10 @@ def _copy_tools(*names: str) -> ToolRegistry:
     return ToolRegistry([item for item in selected if item is not None])
 
 
-def _build_leader_runtime(max_steps: int = 10):
+def _build_leader_runtime(
+    max_steps: int = 10,
+    extra_context_providers: Optional[Sequence[ContextProvider]] = None,
+):
     """Create a request-scoped Leader whose delegation ability is a tool set."""
 
     workers = AgentRegistry()
@@ -327,6 +341,10 @@ def _build_leader_runtime(max_steps: int = 10):
     if RAG_PIPELINE:
         leader_registry.register(create_rag_search_tool(RAG_PIPELINE))
     leader_registry.register_many(orchestrator.leader_tools())
+    context_providers: List[ContextProvider] = []
+    if RAG_PIPELINE:
+        context_providers.append(RAGContextProvider(RAG_PIPELINE))
+    context_providers.extend(extra_context_providers or [])
     leader = ReActAgent(
         llm=_build_llm(),
         tools=leader_registry,
@@ -334,19 +352,26 @@ def _build_leader_runtime(max_steps: int = 10):
         output_guard=OUTPUT_GUARD,
         max_steps=max_steps,
         agent_name="leader",
-        context_providers=[RAGContextProvider(RAG_PIPELINE)] if RAG_PIPELINE else None,
+        context_providers=context_providers or None,
     )
     return orchestrator, leader
+
+
+def _start_session_store() -> SessionMemoryStore:
+    """Swap the module-default in-memory session store for a durable one."""
+
+    return SQLiteSessionStore(os.getenv("SESSION_DB_PATH", "data/sessions.sqlite"))
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Connect explicitly enabled MCP servers and close them on shutdown."""
 
-    global MCP_MANAGER, RAG_REPOSITORY, RAG_PIPELINE, RAG_INGESTION
+    global MCP_MANAGER, RAG_REPOSITORY, RAG_PIPELINE, RAG_INGESTION, SESSION_STORE
     manager = None
     try:
         await asyncio.to_thread(_start_rag)
+        SESSION_STORE = await asyncio.to_thread(_start_session_store)
         if _fetch_mcp_enabled():
             try:
                 from agent.mcp import MCPManager, MCPServerConfig, uv_tool_command
@@ -378,6 +403,9 @@ async def lifespan(_app: FastAPI):
         RAG_REPOSITORY = None
         RAG_PIPELINE = None
         RAG_INGESTION = None
+        if isinstance(SESSION_STORE, SQLiteSessionStore):
+            await asyncio.to_thread(SESSION_STORE.close)
+        SESSION_STORE = InMemorySessionStore()
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +431,11 @@ app.add_middleware(RequestLoggingMiddleware)
 class RunRequest(BaseModel):
     task: str
     max_steps: int = 10
+    conversation_id: Optional[str] = Field(
+        default=None,
+        description="Pass back the conversation_id from a prior response to "
+        "continue that conversation. Omit it to start a new one.",
+    )
 
 
 class RAGDocumentRequest(BaseModel):
@@ -439,9 +472,17 @@ class RunResponse(BaseModel):
     tokens: int
     stop_reason: str
     trajectory: list[dict[str, Any]]
+    conversation_id: Optional[str] = Field(
+        default=None,
+        description="Echoes the conversation this run belongs to; pass it "
+        "back on the next request to continue. Absent when the caller "
+        "didn't ask for continuation.",
+    )
 
     @classmethod
-    def from_result(cls, r: AgentResult) -> "RunResponse":
+    def from_result(
+        cls, r: AgentResult, *, conversation_id: Optional[str] = None
+    ) -> "RunResponse":
         return cls(
             answer=r.answer,
             success=r.success,
@@ -449,6 +490,7 @@ class RunResponse(BaseModel):
             tokens=r.tokens,
             stop_reason=r.stop_reason,
             trajectory=r.trajectory,
+            conversation_id=conversation_id,
         )
 
 
@@ -541,15 +583,36 @@ async def list_tools():
 
 @app.post("/api/run", response_model=RunResponse)
 async def run(req: RunRequest):
-    """Run the request through a Leader with optional delegation tools."""
+    """Run the request through a Leader with optional delegation tools.
+
+    Stateless by default, matching every run before this endpoint knew
+    conversations existed. Only when the caller sets ``conversation_id`` —
+    a client-generated id, reused across calls to continue a conversation —
+    does the run get threaded onto that conversation's stored history via
+    :class:`SessionContextProvider`, with the turn persisted to
+    ``SESSION_STORE`` afterwards. See ``agent/memory/context.py`` for why a
+    stateless ``ReActLoop.run()`` needs this at all.
+    """
+
+    extra_providers: List[ContextProvider] = []
+    session_provider: Optional[SessionContextProvider] = None
+    if req.conversation_id:
+        session_provider = SessionContextProvider(
+            SESSION_STORE, req.conversation_id, llm=_build_llm()
+        )
+        extra_providers.append(session_provider)
 
     def execute():
-        orchestrator, leader = _build_leader_runtime(req.max_steps)
+        orchestrator, leader = _build_leader_runtime(
+            req.max_steps, extra_context_providers=extra_providers
+        )
         with orchestrator:
             return orchestrator.run_leader(leader, req.task)
 
     result = await asyncio.to_thread(execute)
-    return RunResponse.from_result(result)
+    if session_provider is not None:
+        await asyncio.to_thread(session_provider.record_turn, req.task, result.answer)
+    return RunResponse.from_result(result, conversation_id=req.conversation_id)
 
 
 @app.get("/api/stream")

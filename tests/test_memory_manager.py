@@ -19,6 +19,7 @@ from agent import (
     RetentionPolicy,
     RunCompletedEvent,
     SQLiteMemoryRepository,
+    SQLiteSessionStore,
     Sensitivity,
     SummarySnapshot,
     ToolRegistry,
@@ -279,3 +280,30 @@ def test_in_memory_session_store_returns_copies_and_tracks_summary():
     snapshot = SummarySnapshot("conversation-1", "summary", message_id)
     store.save_summary(snapshot)
     assert store.load_summary("conversation-1").through_message_id == message_id
+
+
+def test_sqlite_session_store_persists_messages_and_summary(tmp_path):
+    db_path = str(tmp_path / "sessions.sqlite")
+    store = SQLiteSessionStore(db_path)
+    try:
+        message_id = store.append_message("conversation-1", {"role": "user", "content": "hi"})
+        store.append_message("conversation-1", {"role": "assistant", "content": "hello"})
+        assert store.load_summary("conversation-1") is None
+
+        snapshot = SummarySnapshot("conversation-1", "summary", message_id)
+        store.save_summary(snapshot)
+        store.save_summary(SummarySnapshot("conversation-1", "updated summary", message_id))
+    finally:
+        store.close()
+
+    # Reopen against the same file to prove the data actually hit disk.
+    reopened = SQLiteSessionStore(db_path)
+    try:
+        messages = reopened.load_messages("conversation-1")
+        assert [m["content"] for m in messages] == ["hi", "hello"]
+        loaded_summary = reopened.load_summary("conversation-1")
+        assert loaded_summary.summary == "updated summary"
+        assert loaded_summary.through_message_id == message_id
+        assert reopened.load_messages("other-conversation") == []
+    finally:
+        reopened.close()

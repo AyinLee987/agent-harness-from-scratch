@@ -308,7 +308,8 @@ agent/
     repository.py    in-memory + SQLite source-of-truth repositories
     index.py         replaceable derived vector index
     policy.py        fail-closed extraction and persistence policy
-    session.py       conversation-store interface
+    session.py       🆕 SessionMemoryStore: in-memory + SQLite conversation storage
+    context.py       🆕 SessionContextProvider: replays a session into a stateless run
   trigger/           ← Trigger Layer (when / how)
     gateway.py       🆕 Unified entry: rate limiting + concurrency + queuing
     graph.py         Generic StateGraph engine (pattern-agnostic)
@@ -465,6 +466,46 @@ Pinned deletion requires explicit authorization.
 dimension on each memory. The old `LongTermMemory(llm)` constructor remains as a
 compatibility adapter; production code should configure a dedicated embedding
 provider and rebuild/version indexes when changing models.
+
+## Conversation continuity
+
+`ReActLoop.run()` builds a brand-new `ExecutionContext` on every call — by
+itself it has no memory of a prior call, on purpose (see
+`agent/trigger/react_loop.py`). `POST /api/run` now supports continuing a
+conversation across separate calls by passing a client-generated
+`conversation_id`:
+
+```python
+import requests
+
+r1 = requests.post("http://localhost:8000/api/run", json={
+    "task": "My name is Zhuoyang.",
+    "conversation_id": "conv-123",   # any id you generate; reuse it to continue
+}).json()
+
+r2 = requests.post("http://localhost:8000/api/run", json={
+    "task": "What's my name?",
+    "conversation_id": "conv-123",
+}).json()
+print(r2["answer"])  # -> mentions Zhuoyang
+```
+
+Omit `conversation_id` and the endpoint behaves exactly as before — fully
+stateless, nothing persisted. This is opt-in on purpose: the server never
+starts keeping state you didn't ask it to keep.
+
+Under the hood this is `SessionContextProvider` (`agent/memory/context.py`)
+replaying a conversation's stored messages through the existing
+`ContextProvider` hook, backed by `SessionMemoryStore` — `InMemorySessionStore`
+by default (e.g. when a test calls a route function directly, bypassing app
+startup), swapped for a durable `SQLiteSessionStore` at `data/sessions.sqlite`
+(override with `SESSION_DB_PATH`) once the FastAPI app actually starts. Only
+each turn's user message and final answer are persisted, not the
+intermediate tool-call trajectory — a later turn replays this as plain
+conversation, not a raw execution log (that's what `AgentResult.trajectory`
+is for). Once a conversation passes 24 stored messages, older messages are
+folded into a single persisted summary instead of being replayed (and
+re-summarized by `ShortTermMemory`) in full on every subsequent turn.
 
 ## Structured logging
 

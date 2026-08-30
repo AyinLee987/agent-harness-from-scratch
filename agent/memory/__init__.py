@@ -1,5 +1,6 @@
 """Policy-controlled agent memory public API."""
 
+from .context import SessionContextProvider
 from .embeddings import (
     EmbeddingProvider,
     LLMEmbeddingProvider,
@@ -37,7 +38,7 @@ from .repository import (
     MemoryRepository,
     SQLiteMemoryRepository,
 )
-from .session import InMemorySessionStore, SessionMemoryStore
+from .session import InMemorySessionStore, SessionMemoryStore, SQLiteSessionStore
 
 __all__ = [
     "DefaultMemoryPolicy",
@@ -67,7 +68,9 @@ __all__ = [
     "RetentionPolicy",
     "RunCompletedEvent",
     "SQLiteMemoryRepository",
+    "SQLiteSessionStore",
     "Sensitivity",
+    "SessionContextProvider",
     "SessionMemoryStore",
     "SummarySnapshot",
     "VectorHit",

@@ -66,7 +66,10 @@ from .memory import (
     RetentionPolicy,
     RunCompletedEvent,
     SQLiteMemoryRepository,
+    SQLiteSessionStore,
     Sensitivity,
+    SessionContextProvider,
+    SessionMemoryStore,
     SummarySnapshot,
 )
 from .multi_agent import (
@@ -176,6 +179,9 @@ __all__ = [
     "SQLiteMemoryRepository",
     "InMemoryVectorIndex",
     "InMemorySessionStore",
+    "SQLiteSessionStore",
+    "SessionContextProvider",
+    "SessionMemoryStore",
     "DefaultMemoryPolicy",
     "NoopMemoryExtractor",
     "OpenAICompatibleEmbeddingProvider",

@@ -33,7 +33,11 @@ htmlcov/
 results.json
 logs/
 
+# Local runtime state (RAG/session SQLite DBs, etc.)
+data/
+
 # Editor / OS
 .idea/
 .vscode/
 .DS_Store
+.pytest-tmp/
