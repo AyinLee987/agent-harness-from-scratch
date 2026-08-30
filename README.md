@@ -2,7 +2,7 @@
 
 A minimal, production-shaped **ReAct agent framework** built from first principles in pure Python — no LangChain, no LlamaIndex. The goal is to show the *internals* of an agent runtime: the think–act loop, an execution context, a typed tool abstraction, memory, guardrails, and an evaluation harness.
 
-[![CI](https://github.com/sudhanshu-shivam-dev/agent-harness-from-scratch/actions/workflows/ci.yml/badge.svg)](https://github.com/sudhanshu-shivam-dev/agent-harness-from-scratch/actions/workflows/ci.yml)
+[![CI](https://github.com/AyinLee987/agent-harness-from-scratch/actions/workflows/ci.yml/badge.svg)](https://github.com/AyinLee987/agent-harness-from-scratch/actions/workflows/ci.yml)
 
 ![ReAct Agent Playground](docs/app-trajectory.png)
 
@@ -40,14 +40,17 @@ Most "agent" projects wire together a framework and call it a day. This one impl
 
 - **ExecutionContext** — owns state, step history, and a token/step budget
 - **Tool abstraction** — a `@tool` decorator that auto-generates JSON schemas from function signatures
-- **Memory** — short-term context management (window + summarization) and long-term vector recall
+- **Memory** — short-term context management (window + summarization), policy-controlled long-term vector recall, and multi-turn conversation continuity (see [Conversation continuity](#conversation-continuity))
 - **Context compression** — query-aware compression that shrinks the input before the LLM call, inspired by recent long-context research
 - **Guardrails** — max-step limits, finish/confidence checks, and safe handling of malformed tool calls
 - **Tool-output safety** — an injection guard that screens untrusted tool output for indirect prompt injection
+- **Multi-agent orchestration** — a Leader can spawn/await Worker subagents as ordinary tools, with isolated state and hard resource limits (see [Leader and Subagents](#leader-and-subagents))
+- **Governed hybrid RAG** — an optional BM25 + dense + RRF retrieval layer with citations and staged, versioned ingestion (see [Governed hybrid RAG](#governed-hybrid-rag))
+- **MCP tool integration** — remote MCP servers register as ordinary tools, no special-casing in the agent core
 - **Observability** — a run id and per-step correlation ids thread through `ExecutionContext`
 - **Evaluation harness** — runs the agent over a task set, logs full trajectories, and scores with rule-based, **trajectory-level**, and optional LLM-as-judge
 
-It runs **with zero setup and no API key** thanks to a deterministic `MockLLM`, and switches to a real model when `OPENAI_API_KEY` is provided.
+It runs **with zero setup and no API key** thanks to a deterministic `MockLLM`, and switches to a real model when `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, or Bailian credentials are provided (see `agent/llm.py` for `OpenAILLM` / `DeepSeekLLM` / `BailianLLM`, and `examples/deepseek_demo.py` / `examples/bailian_sqlite_demo.py`).
 
 ## Architecture
 
@@ -319,27 +322,62 @@ agent/
     context.py       ExecutionContext: messages, steps, budget, run_id
     memory.py        ShortTermMemory + LongTermMemory (vector recall)
     store.py         BaseVectorStore → NumPy / SQLite / (FAISS / Qdrant future)
+  multi_agent/       ← Leader/Worker delegation
+    orchestrator.py  MultiAgentOrchestrator: spawn/await/cancel Worker tasks
+    registry.py      AgentRegistry: named Worker factories (fresh agent per task)
+    tools.py         spawn_subagent / get_subagent_status / wait_subagents / cancel_subagent
+    models.py        RunBudget, SubagentTask/Result, TaskStatus
+  rag/               ← Governed hybrid RAG (see "Governed hybrid RAG" below)
+    chunking.py      structure-first parent/child chunker
+    ingestion.py      staged ingestion, dedup, versioned publication
+    retrieval.py     BM25Retriever + DenseRetriever
+    pipeline.py      RAGPipeline: fusion + rerank + parent-context hydration
+    rerank.py        HeuristicReranker / CallableReranker
+    query.py         MedicalQueryPlanner
+    context.py       RAGContextProvider + create_rag_search_tool
+    repository.py    in-memory + SQLite document/chunk storage
+    models.py        Document, Chunk, Citation, Evidence(Bundle) types
+  local_tools/       ← opt-in workspace file + CLI tools (see "Local workspace and CLI tools")
+    tools.py         ReadFileTool, WriteFileTool, ListFilesTool, RunCommandTool
+  context.py         ContextProvider protocol: pluggable pre-model-call hooks
+  errors.py          ToolCallError taxonomy: RecoverableToolError / FatalToolError
   tools.py           BaseTool + @tool decorator (auto JSON schema) + ToolRegistry
   mcp/               persistent MCP clients + dynamic BaseTool proxies
   llm.py             LLM clients: MockLLM, OpenAI, DeepSeek, Bailian
   compression.py     ContextCompressor: query-aware context compression
   safety.py          ToolOutputGuard: indirect prompt-injection defense
+  observability.py   structured logging, correlation-id context, secret redaction
   agent.py           Thin facade: wires trigger + state + shared infrastructure
   eval/
     harness.py       runs tasks; rule-based + trajectory + LLM-as-judge scoring
     tasks.json       sample eval tasks with expected outcomes
+server.py            FastAPI app: /api/run, /api/stream, /api/tools, /api/rag/documents
+rag_ingest.py        CLI for local/batch RAG corpus ingestion
 examples/
-  basic_tools.py         calculator + web-search-stub + datetime tools
+  basic_tools.py         calculator + web-search-stub + datetime + memory_search tools
   context_compression.py query-aware context compression demo
   prompt_injection.py    tool-output injection guard before/after demo
   mcp_fetch.py            official Fetch MCP registered as fetch__fetch
   memory_demo.py         long-term vector memory recall demo
+  medical_rag.py         governed hybrid RAG pipeline demo
+  deepseek_demo.py       running the agent against DeepSeek instead of MockLLM
+  bailian_sqlite_demo.py running against Bailian with SQLite-backed memory/RAG
   run_eval.py            runs the eval harness and prints a scorecard
 tests/
-  test_agent.py          unit + integration tests (run entirely on MockLLM)
-  test_mcp.py            MCP discovery, proxy, lifecycle, and result tests
-  test_compression.py    tests for the context compressor
-  test_safety.py         tests for the prompt-injection guard
+  test_agent.py                    unit + integration tests (run entirely on MockLLM)
+  test_graph.py                    StateGraph engine tests
+  test_compression.py              tests for the context compressor
+  test_safety.py                   tests for the prompt-injection guard
+  test_observability.py            structured logging + correlation id tests
+  test_mcp.py                      MCP discovery, proxy, lifecycle, and result tests
+  test_memory_manager.py           MemoryManager lifecycle + session store tests
+  test_multi_agent.py              Leader/Worker orchestration tests
+  test_rag.py                      chunking, retrieval, RRF fusion, rerank tests
+  test_rag_ingestion_endpoint.py   the RAG document-upload API endpoint
+  test_local_tools.py              workspace file tools + allowlisted CLI tool
+  test_server_delegation.py        delegation as an ordinary Leader tool, via /api/*
+  test_server_conversation.py      🆕 conversation_id continuity on /api/run
+  test_session_context.py          🆕 SessionContextProvider replay + summarization
 web/
   ReAct Agent Playground — interactive browser demo (Vite + React + TS)
 ```
@@ -351,11 +389,17 @@ web/
 - [x] Correlation ids through the execution context
 - [x] Trigger / State layer architecture separation
 - [x] Gateway with rate limiting + concurrency control
-- [ ] Async multi-agent orchestration (planner/executor)
+- [x] Leader/Worker multi-agent delegation (synchronous dispatch; see below)
 - [x] MCP tool integration (stdio + Streamable HTTP)
+- [x] Policy-controlled durable memory (`MemoryManager`), replacing implicit auto-save
+- [x] Governed hybrid RAG (BM25 + dense + RRF, citations, versioned ingestion)
+- [x] Opt-in local workspace file tools + allowlisted CLI tool
+- [x] Multi-turn conversation continuity (`conversation_id` on `/api/run`)
+- [ ] Async multi-agent orchestration (Worker dispatch currently runs via `asyncio.to_thread`, not a native async tool loop)
 - [ ] Persistent vector memory (FAISS/Qdrant)
 - [ ] Trained context encoder (LCLM/ACON-style) behind the compressor interface
 - [ ] Per-task regression suite generated from production failures
+- [ ] `conversation_id` support on `/api/stream` (currently `/api/run`-only)
 
 ## Tool error classification
 
