@@ -37,18 +37,44 @@
   body {
     font: 15px/1.6 system-ui, -apple-system, sans-serif;
     background: var(--bg); color: var(--text);
-    min-height: 100vh; display: flex; flex-direction: column;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden;
   }
   header {
     padding: 16px 24px; border-bottom: 1px solid var(--border);
-    background: var(--card-bg); display: flex; align-items: center; gap: 12px;
+    background: var(--card-bg); display: flex; align-items: center; gap: 12px; flex-shrink: 0;
   }
   header h1 { font-size: 18px; font-weight: 700; }
   .badge { font-size: 11px; background: var(--accent); color: #fff; padding: 2px 8px; border-radius: 10px; }
   #status { font-size: 12px; color: var(--text-dim); margin-left: auto; }
   #status.ok { color: #4caf50; }
-  main { flex: 1; max-width: 800px; width: 100%; margin: 0 auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
-  .trace { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; min-height: 200px; max-height: calc(100vh - 260px); }
+  .icon-btn { display: none; background: transparent; border: none; font-size: 20px; line-height: 1; cursor: pointer; color: var(--text); padding: 4px 8px; border-radius: 6px; }
+  .icon-btn:hover { background: var(--tool-bg); }
+
+  /* -- layout: sidebar + main -------------------------------------------- */
+  .layout { flex: 1; display: flex; min-height: 0; position: relative; }
+  .sidebar {
+    width: 260px; flex-shrink: 0; background: var(--card-bg); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; padding: 14px; gap: 10px; overflow-y: auto;
+  }
+  .new-conv-btn {
+    padding: 10px; border-radius: 8px; border: 1px dashed var(--accent-dim); background: transparent;
+    color: var(--accent); font-weight: 600; font-size: 13px; cursor: pointer; flex-shrink: 0;
+  }
+  .new-conv-btn:hover { background: var(--tool-bg); opacity: 1; }
+  .sidebar-hint { font-size: 11px; color: var(--text-dim); padding: 0 2px; }
+  .conv-list { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
+  .conv-item {
+    padding: 10px 12px; border-radius: 8px; cursor: pointer; font-size: 13px;
+    color: var(--text-dim); border: 1px solid transparent; display: flex; flex-direction: column; gap: 2px;
+  }
+  .conv-item:hover { background: var(--tool-bg); }
+  .conv-item.active { background: var(--tool-bg); border-color: var(--accent-dim); color: var(--text); font-weight: 600; }
+  .conv-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .conv-time { font-size: 10px; color: var(--text-dim); font-weight: 400; }
+  .sidebar-backdrop { display: none; }
+
+  main { flex: 1; min-width: 0; max-width: 800px; width: 100%; margin: 0 auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+  .trace { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; min-height: 200px; }
   .trace:empty::after { content: "输入任务，看看 agent 怎么一步一步推理的 →"; color: var(--text-dim); text-align: center; padding: 60px 0; display: block; }
   .event { padding: 10px 14px; border-radius: 8px; font-size: 14px; animation: fadeIn 0.2s; word-break: break-word; }
   @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
@@ -58,6 +84,8 @@
   .event.answer { background: var(--card-bg); border: 2px solid var(--accent); font-weight: 500; }
   .event.error { background: var(--error-bg); border-left: 3px solid #e53935; }
   .event.task-root { background: var(--tool-bg); border: 1px solid var(--accent-dim); }
+  .event.user-msg { background: var(--accent); color: #fff; align-self: flex-end; max-width: 85%; border-radius: 12px 12px 2px 12px; }
+  .event.user-msg .label { color: rgba(255, 255, 255, 0.85); }
   .event .label { font-size: 11px; text-transform: uppercase; font-weight: 700; letter-spacing: 0.5px; margin-bottom: 4px; color: var(--text-dim); display: block; }
   .event .label.thinking { color: var(--thinking); }
   .tool-name { font-weight: 600; color: var(--accent); }
@@ -92,64 +120,196 @@
   .worker-card::before { content: ""; position: absolute; left: -22px; top: 21px; width: 21px; height: 2px; background: var(--worker-line); }
   .worker-card.failed { border-color: #e57373; }
   @media (max-width: 620px) { .workers { margin-left: 10px; } }
+
+  @media (max-width: 820px) {
+    .icon-btn { display: inline-block; }
+    .sidebar {
+      position: fixed; top: 0; left: 0; bottom: 0; z-index: 20; width: 78vw; max-width: 300px;
+      transform: translateX(-100%); transition: transform 0.2s ease; box-shadow: 2px 0 16px rgba(0, 0, 0, 0.2);
+    }
+    .sidebar.open { transform: translateX(0); }
+    .sidebar-backdrop.open { display: block; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.35); z-index: 15; }
+  }
 </style>
 </head>
 <body>
 <header>
+  <button class="icon-btn" onclick="toggleSidebar()" title="对话列表">☰</button>
   <h1>🤖 Agent Playground</h1>
   <span class="badge" id="model-badge">--</span>
   <span id="status">● 检测中…</span>
 </header>
-<main>
-  <div class="quick-tasks">
-    <button onclick="run('What is 23 times 17?')">23 × 17</button>
-    <button onclick="run('Search for the capital of France')">法国首都</button>
-    <button onclick="run('What is today\'s date?')">今天日期</button>
-    <button onclick="run('Calculate (12 + 8) * 5 then subtract 30')">(12+8)×5 再减30</button>
-    <button onclick="run('What is the speed of light?')">光速</button>
-    <button onclick="run('Who created Python?')">Python 之父</button>
-    <button onclick="run('Research Python and JavaScript, then compare their strengths')">多角色对比</button>
-  </div>
-  <div class="trace" id="trace"></div>
-  <div class="stats" id="stats"><span></span><span></span></div>
-  <div class="input-area">
-    <textarea id="task" rows="1" placeholder="输入任务，回车发送…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();run()}"></textarea>
-    <button id="btn-run" onclick="run()">▶ 运行</button>
-    <button id="btn-stop" class="stop" onclick="stop()">■ 停止</button>
-  </div>
-</main>
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <button class="new-conv-btn" onclick="newConversation()">＋ 新对话</button>
+    <div class="sidebar-hint">对话场景 · 标题为自动生成的对话总结</div>
+    <div class="conv-list" id="conv-list"></div>
+  </aside>
+  <div class="sidebar-backdrop" id="sidebar-backdrop" onclick="toggleSidebar(false)"></div>
+  <main>
+    <div class="quick-tasks">
+      <button onclick="run('What is 23 times 17?')">23 × 17</button>
+      <button onclick="run('Search for the capital of France')">法国首都</button>
+      <button onclick="run('What is today\'s date?')">今天日期</button>
+      <button onclick="run('Calculate (12 + 8) * 5 then subtract 30')">(12+8)×5 再减30</button>
+      <button onclick="run('What is the speed of light?')">光速</button>
+      <button onclick="run('Who created Python?')">Python 之父</button>
+      <button onclick="run('Research Python and JavaScript, then compare their strengths')">多角色对比</button>
+    </div>
+    <div class="trace" id="trace"></div>
+    <div class="stats" id="stats"><span></span><span></span></div>
+    <div class="input-area">
+      <textarea id="task" rows="1" placeholder="输入任务，回车发送… （同一个对话内会记住上下文）" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();run()}"></textarea>
+      <button id="btn-run" onclick="run()">▶ 运行</button>
+      <button id="btn-stop" class="stop" onclick="stop()">■ 停止</button>
+    </div>
+  </main>
+</div>
 
 <script>
 const API = window.location.protocol === 'http:' || window.location.protocol === 'https:'
   ? window.location.origin
   : 'http://127.0.0.1:8000';
+const CONV_STORAGE_KEY = 'playground.conversations';
+
 let abortCtrl = null;
 let stepCount = 0;
 let pendingSpawnArgs = [];
 let subagentCards = new Map();
 let runSummary = null;
+let turnSeq = 0;
+
+// -- conversations: client-side list of {id, title, updatedAt} ------------
+// The server only stores messages per conversation_id (no "list all
+// conversations" endpoint — see SessionMemoryStore) — this list of known
+// ids, and the display title cached for each, lives in localStorage.
+let conversations = [];
+let currentConversationId = null;
+
+function loadConversations() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(CONV_STORAGE_KEY));
+    return Array.isArray(raw) ? raw : [];
+  } catch (e) { return []; }
+}
+
+function saveConversations() {
+  try { localStorage.setItem(CONV_STORAGE_KEY, JSON.stringify(conversations)); } catch (e) { /* best-effort */ }
+}
+
+function genConversationId() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+  let out = '';
+  for (let i = 0; i < 12; i++) out += Math.floor(Math.random() * 16).toString(16);
+  return out;
+}
+
+function renderSidebar() {
+  const list = document.getElementById('conv-list');
+  list.innerHTML = '';
+  const sorted = [...conversations].sort((a, b) => b.updatedAt - a.updatedAt);
+  for (const conv of sorted) {
+    const item = document.createElement('div');
+    item.className = 'conv-item' + (conv.id === currentConversationId ? ' active' : '');
+    item.innerHTML = `
+      <div class="conv-title">${h(conv.title || '新对话')}</div>
+      <div class="conv-time">${new Date(conv.updatedAt).toLocaleString()}</div>`;
+    item.onclick = () => selectConversation(conv.id);
+    list.appendChild(item);
+  }
+}
+
+function newConversation() {
+  if (abortCtrl) stop();
+  const conv = { id: genConversationId(), title: '新对话', updatedAt: Date.now() };
+  conversations.push(conv);
+  saveConversations();
+  currentConversationId = conv.id;
+  document.getElementById('trace').innerHTML = '';
+  document.getElementById('stats').innerHTML = '<span></span><span></span>';
+  renderSidebar();
+  closeSidebarOnMobile();
+}
+
+async function selectConversation(id) {
+  if (id === currentConversationId) { closeSidebarOnMobile(); return; }
+  if (abortCtrl) stop();
+  currentConversationId = id;
+  renderSidebar();
+  const trace = document.getElementById('trace');
+  document.getElementById('stats').innerHTML = '<span></span><span></span>';
+  trace.innerHTML = '';
+  try {
+    const r = await fetch(`${API}/api/conversations/${encodeURIComponent(id)}`);
+    const data = await r.json();
+    for (const m of data.messages || []) {
+      if (m.role === 'user') addEvent('user-msg', `<span class="label">🙋 你</span>${h(m.content)}`);
+      else if (m.role === 'assistant') addEvent('answer', `<span class="label">✅ 回答</span>${h(m.content)}`);
+    }
+  } catch (e) {
+    addEvent('error', `<span class="label">❌ 加载历史失败</span>${h(e.message)}`);
+  }
+  closeSidebarOnMobile();
+}
+
+async function fetchTitleIfMissing() {
+  const convo = conversations.find(c => c.id === currentConversationId);
+  if (!convo || (convo.title && convo.title !== '新对话')) return;
+  try {
+    const r = await fetch(`${API}/api/conversations/${encodeURIComponent(currentConversationId)}/title`);
+    if (!r.ok) return;
+    const data = await r.json();
+    if (data.title) {
+      convo.title = data.title;
+      saveConversations();
+      renderSidebar();
+    }
+  } catch (e) { /* best-effort — the placeholder title is a fine fallback */ }
+}
+
+function toggleSidebar(force) {
+  const sb = document.getElementById('sidebar');
+  const bd = document.getElementById('sidebar-backdrop');
+  const open = typeof force === 'boolean' ? force : !sb.classList.contains('open');
+  sb.classList.toggle('open', open);
+  bd.classList.toggle('open', open);
+}
+
+function closeSidebarOnMobile() {
+  if (window.innerWidth <= 820) toggleSidebar(false);
+}
 
 async function init() {
   try {
     const r = await fetch(`${API}/api/health`);
-    const h = await r.json();
-    document.getElementById('model-badge').textContent = h.model || 'mock';
+    const data = await r.json();
+    document.getElementById('model-badge').textContent = data.model || 'mock';
     document.getElementById('status').textContent = '● 就绪';
     document.getElementById('status').className = 'ok';
   } catch (e) {
-    document.getElementById('status').textContent = '● 请先启动: uvicorn server:app';
+    document.getElementById('status').textContent = '● 请先启动: uvicorn app.server:app';
     document.getElementById('status').className = '';
   }
+
+  conversations = loadConversations();
+  if (conversations.length === 0) {
+    conversations.push({ id: genConversationId(), title: '新对话', updatedAt: Date.now() });
+    saveConversations();
+  }
+  const mostRecent = [...conversations].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  renderSidebar();
+  await selectConversation(mostRecent.id);
 }
 
 function run(task) {
   const t = task || document.getElementById('task').value.trim();
   if (!t) return;
   document.getElementById('task').value = '';
-  const trace = document.getElementById('trace');
-  trace.innerHTML = '';
+  if (!currentConversationId) newConversation();
+  addEvent('user-msg', `<span class="label">🙋 你</span>${h(t)}`);
   document.getElementById('stats').innerHTML = '<span></span><span></span>';
   stepCount = 0;
+  turnSeq += 1;
   pendingSpawnArgs = [];
   subagentCards = new Map();
   runSummary = null;
@@ -182,7 +342,7 @@ async function startStream(task) {
   const startTime = Date.now();
 
   try {
-    const url = `${API}/api/stream?task=${encodeURIComponent(task)}`;
+    const url = `${API}/api/stream?task=${encodeURIComponent(task)}&conversation_id=${encodeURIComponent(currentConversationId)}`;
     const resp = await fetch(url, { signal: abortCtrl.signal });
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
@@ -256,6 +416,14 @@ async function startStream(task) {
       `<span>${root}${stepCount} 步 · ${elapsed}s</span>
        <span>${workerCount ? `${workerCount} 个 Subagent · ` : ''}<a href="#" onclick="document.getElementById('trace').scrollTop=0;return false">↑ 回到顶部</a></span>`;
 
+    const convo = conversations.find(c => c.id === currentConversationId);
+    if (convo) {
+      convo.updatedAt = Date.now();
+      saveConversations();
+      renderSidebar();
+    }
+    fetchTitleIfMissing();
+
   } catch (e) {
     if (e.name !== 'AbortError') {
       addEvent('error', `<span class="label">❌ 连接错误</span>${h(e.message)}`);
@@ -285,10 +453,15 @@ function handleDelegationResult(toolName, rendered) {
 }
 
 function ensureSubagentTree() {
-  let tree = document.getElementById('subagent-tree');
+  // Scoped to the current turn (turnSeq) so a new turn in the same
+  // conversation gets its own tree instead of reusing a prior turn's —
+  // the trace is no longer cleared between turns now that conversations
+  // persist across them.
+  const id = `subagent-tree-${turnSeq}`;
+  let tree = document.getElementById(id);
   if (tree) return tree.querySelector('.workers');
   tree = document.createElement('div');
-  tree.id = 'subagent-tree';
+  tree.id = id;
   tree.className = 'agent-tree';
   tree.innerHTML = `
     <div class="leader-node">

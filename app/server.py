@@ -625,11 +625,88 @@ async def run(req: RunRequest):
     return RunResponse.from_result(result, conversation_id=req.conversation_id)
 
 
-@app.get("/api/stream")
-async def stream(task: str = Query(..., description="Task for the agent")):
-    """SSE streaming endpoint — real-time think / tool_call / tool_result / answer."""
+@app.get("/api/conversations/{conversation_id}")
+async def conversation_messages(conversation_id: str):
+    """Return a stored conversation's turns, so a UI can restore it.
 
-    orchestrator, agent = _build_leader_runtime(max_steps=10)
+    An id nothing has been recorded under yet is not an error — it's just a
+    new conversation the client generated but hasn't sent a turn on — so
+    this returns an empty list rather than 404ing.
+    """
+
+    messages = await asyncio.to_thread(SESSION_STORE.load_messages, conversation_id)
+    return {"conversation_id": conversation_id, "messages": messages}
+
+
+@app.get("/api/conversations/{conversation_id}/title")
+async def conversation_title(conversation_id: str):
+    """A short display title for a stored conversation — for a sidebar/history UI.
+
+    Nothing here is persisted: ``SESSION_STORE``'s messages are the only
+    source of truth, this just describes them. Re-calling this can return a
+    differently-worded title each time, since it's a fresh LLM call, not a
+    stored value — callers (the playground UI) cache the result client-side
+    rather than re-requesting it on every render.
+    """
+
+    messages = await asyncio.to_thread(SESSION_STORE.load_messages, conversation_id)
+    if not messages:
+        raise HTTPException(404, "Unknown or empty conversation_id.")
+
+    first_user = next((str(m.get("content") or "") for m in messages if m.get("role") == "user"), "")
+    fallback = (first_user[:24] + "…") if len(first_user) > 24 else (first_user or "对话")
+
+    llm = _build_llm()
+    transcript = "\n".join(
+        f"{m.get('role')}: {m.get('content')}" for m in messages[:6] if m.get("content")
+    )
+    prompt = [
+        {
+            "role": "system",
+            "content": "Write a short title summarizing what this conversation "
+            "is about, at most 6 words, in the same language the conversation "
+            "is written in. Output only the title itself — no quotes, no "
+            "trailing punctuation, no explanation.",
+        },
+        {"role": "user", "content": transcript},
+    ]
+    resp = await asyncio.to_thread(llm.chat, prompt, [])
+    title = (resp.content or "").strip().strip("\"“”")
+    if not title or len(title) > 60:
+        title = fallback
+    return {"conversation_id": conversation_id, "title": title}
+
+
+@app.get("/api/stream")
+async def stream(
+    task: str = Query(..., description="Task for the agent"),
+    conversation_id: Optional[str] = None,
+):
+    """SSE streaming endpoint — real-time think / tool_call / tool_result / answer.
+
+    Supports the same opt-in ``conversation_id`` continuity as ``POST /api/run``
+    (see there, and ``agent/memory/context.py``, for why a stateless
+    ``ReActLoop`` needs this at all) — stateless by default, threaded onto
+    stored history and persisted afterwards only when the caller sets one.
+    Passed as a plain query param, e.g. ``/api/stream?task=...&conversation_id=conv-123``.
+
+    Note: unlike ``task``, this is intentionally *not* wrapped in
+    ``fastapi.Query(...)`` — a route function called directly (as this
+    project's tests do, bypassing FastAPI's request-parsing layer) would
+    otherwise receive the unresolved ``Query`` sentinel object instead of
+    ``None`` when the caller omits it.
+    """
+
+    session_provider: Optional[SessionContextProvider] = None
+    if conversation_id:
+        session_provider = SessionContextProvider(
+            SESSION_STORE, conversation_id, llm=_build_llm()
+        )
+
+    orchestrator, agent = _build_leader_runtime(
+        max_steps=10,
+        extra_context_providers=[session_provider] if session_provider else None,
+    )
     llm = agent.llm
     leader_registry = agent.tools
 
@@ -646,6 +723,7 @@ async def stream(task: str = Query(..., description="Task for the agent")):
         dispatcher = ToolDispatcher(leader_registry)
         stop_reason = "max_steps"
         root_run_id = ""
+        final_answer: Optional[str] = None
 
         try:
             with orchestrator.leader_scope() as root_run_id:
@@ -663,6 +741,7 @@ async def stream(task: str = Query(..., description="Task for the agent")):
                         "task": task,
                         "tools": leader_registry.names(),
                         "root_run_id": root_run_id,
+                        "conversation_id": conversation_id,
                     })
 
                     async for payload in _stream_leader_steps(
@@ -676,6 +755,8 @@ async def stream(task: str = Query(..., description="Task for the agent")):
                         if payload[0] == "__stop__":
                             stop_reason = payload[1]["stop_reason"]
                         else:
+                            if payload[0] == "answer":
+                                final_answer = payload[1]["text"]
                             yield _sse(payload[0], payload[1])
 
                     log_event(
@@ -689,6 +770,12 @@ async def stream(task: str = Query(..., description="Task for the agent")):
                         elapsed_ms=round((time.perf_counter() - stream_started) * 1000, 2),
                     )
 
+            # Only a run that actually produced a final answer is worth
+            # remembering — a cancelled/budget/fatal-error stop has nothing
+            # coherent to attribute to the assistant's side of the turn.
+            if session_provider is not None and final_answer is not None:
+                await asyncio.to_thread(session_provider.record_turn, task, final_answer)
+
             subagents = [
                 item.to_dict() for item in orchestrator.results_for_run(root_run_id)
             ]
@@ -699,6 +786,7 @@ async def stream(task: str = Query(..., description="Task for the agent")):
                 "stop_reason": stop_reason,
                 "root_run_id": root_run_id,
                 "subagents": subagents,
+                "conversation_id": conversation_id,
             })
         finally:
             await asyncio.to_thread(orchestrator.close)

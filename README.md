@@ -395,12 +395,12 @@ web/
 - [x] Policy-controlled durable memory (`MemoryManager`), replacing implicit auto-save
 - [x] Governed hybrid RAG (BM25 + dense + RRF, citations, versioned ingestion)
 - [x] Opt-in local workspace file tools + allowlisted CLI tool
-- [x] Multi-turn conversation continuity (`conversation_id` on `/api/run`)
+- [x] Multi-turn conversation continuity (`conversation_id` on both `/api/run` and `/api/stream`)
+- [x] Conversation history/title endpoints + a playground sidebar for browsing and switching between conversations
 - [ ] Async multi-agent orchestration (Worker dispatch currently runs via `asyncio.to_thread`, not a native async tool loop)
 - [ ] Persistent vector memory (FAISS/Qdrant)
 - [ ] Trained context encoder (LCLM/ACON-style) behind the compressor interface
 - [ ] Per-task regression suite generated from production failures
-- [ ] `conversation_id` support on `/api/stream` (currently `/api/run`-only)
 
 ## Tool error classification
 
@@ -516,9 +516,9 @@ provider and rebuild/version indexes when changing models.
 
 `ReActLoop.run()` builds a brand-new `ExecutionContext` on every call — by
 itself it has no memory of a prior call, on purpose (see
-`agent/trigger/react_loop.py`). `POST /api/run` now supports continuing a
-conversation across separate calls by passing a client-generated
-`conversation_id`:
+`agent/trigger/react_loop.py`). Both `POST /api/run` and `GET /api/stream`
+support continuing a conversation across separate calls by passing a
+client-generated `conversation_id`:
 
 ```python
 import requests
@@ -535,9 +535,30 @@ r2 = requests.post("http://localhost:8000/api/run", json={
 print(r2["answer"])  # -> mentions Zhuoyang
 ```
 
-Omit `conversation_id` and the endpoint behaves exactly as before — fully
+`GET /api/stream?task=...&conversation_id=conv-123` works the same way — the
+Agent Playground (`web/playground.html`, served at `GET /`) uses exactly this
+to give the browser UI real multi-turn conversations: it keeps a sidebar of
+known `conversation_id`s (tracked client-side in `localStorage`, since the
+server intentionally has no "list all conversations" endpoint —
+`SessionMemoryStore` is keyed by id, not enumerable), lets you switch between
+them, and labels each entry with an LLM-generated **conversation title** —
+see below.
+
+Omit `conversation_id` and either endpoint behaves exactly as before — fully
 stateless, nothing persisted. This is opt-in on purpose: the server never
 starts keeping state you didn't ask it to keep.
+
+Two read-only endpoints support a history/sidebar UI without adding any new
+storage:
+
+- `GET /api/conversations/{conversation_id}` — the stored turns for that
+  conversation (empty list, not 404, for an id nothing has been sent under
+  yet — a client-generated id the user hasn't used is not an error).
+- `GET /api/conversations/{conversation_id}/title` — a short title
+  summarizing the conversation, generated fresh from its stored messages on
+  every call (nothing is persisted here — a second call can word it
+  differently). The playground caches the first one it gets per conversation
+  client-side rather than re-requesting it on every render.
 
 Under the hood this is `SessionContextProvider` (`agent/memory/context.py`)
 replaying a conversation's stored messages through the existing
