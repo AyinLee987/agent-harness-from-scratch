@@ -269,6 +269,43 @@ def test_short_term_memory_summarizes_when_over_budget():
     assert len(managed) < len(messages)
 
 
+def test_short_term_memory_never_separates_a_tool_calls_message_from_its_tool_responses():
+    # A naive tail-slice window can cut between an assistant's tool_calls
+    # message and the tool responses that answer it — e.g. exactly where a
+    # multi-agent delegation step (assistant + 2 parallel spawn_subagent
+    # calls + 2 tool results) happens to fall relative to the window
+    # boundary. Every OpenAI-compatible chat API rejects a 'tool' message
+    # whose triggering tool_calls message isn't present, so that shape is a
+    # 400 waiting to happen, not just a lossy summary.
+    stm = ShortTermMemory(MockLLM(), window=12, max_tokens=4000)
+    messages = [{"role": "system", "content": "sys"}]
+    for i in range(5):
+        messages.append({"role": "user", "content": f"turn {i}"})
+        messages.append({"role": "assistant", "content": f"reply {i}"})
+    messages.append({
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {"id": "call_A", "type": "function", "function": {"name": "spawn_subagent", "arguments": "{}"}},
+            {"id": "call_B", "type": "function", "function": {"name": "spawn_subagent", "arguments": "{}"}},
+        ],
+    })
+    messages.append({"role": "tool", "content": "result A", "tool_call_id": "call_A", "name": "spawn_subagent"})
+    messages.append({"role": "tool", "content": "result B", "tool_call_id": "call_B", "name": "spawn_subagent"})
+    for i in range(5, 10):
+        messages.append({"role": "user", "content": f"turn {i}"})
+        messages.append({"role": "assistant", "content": f"reply {i}"})
+
+    managed = stm.manage(messages)
+
+    seen_ids: set = set()
+    for m in managed:
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            seen_ids = {tc["id"] for tc in m["tool_calls"]}
+        elif m.get("role") == "tool":
+            assert m.get("tool_call_id") in seen_ids, f"orphaned tool message: {m}"
+
+
 # ---------------------------------------------------------------------------
 # Eval harness
 # ---------------------------------------------------------------------------

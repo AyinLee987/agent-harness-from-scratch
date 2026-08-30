@@ -21,6 +21,33 @@ from ..memory.embeddings import EmbeddingProvider, LLMEmbeddingProvider
 from .store import BaseVectorStore, NumPyVectorStore
 
 
+def _tool_call_groups(messages: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """Partition ``messages`` into atomic units for windowing.
+
+    An assistant message carrying ``tool_calls`` plus every ``tool`` message
+    that immediately follows it (its responses) must always move together —
+    an OpenAI-compatible API rejects a ``tool`` message whose triggering
+    ``tool_calls`` message isn't present. Every other message is its own
+    one-message group.
+    """
+
+    groups: List[List[Dict[str, Any]]] = []
+    i = 0
+    n = len(messages)
+    while i < n:
+        message = messages[i]
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            j = i + 1
+            while j < n and messages[j].get("role") == "tool":
+                j += 1
+            groups.append(messages[i:j])
+            i = j
+        else:
+            groups.append([message])
+            i += 1
+    return groups
+
+
 class ShortTermMemory:
     """Sliding-window message memory with a summarization fallback.
 
@@ -48,9 +75,27 @@ class ShortTermMemory:
         system = messages[0:1] if messages and messages[0].get("role") == "system" else []
         body = messages[len(system):]
 
-        # Keep the freshest `window` messages verbatim; summarize the rest.
-        recent = body[-self.window:]
-        older = body[: len(body) - len(recent)]
+        # Keep the freshest `window` messages verbatim, in whole tool-call
+        # groups (see `_tool_call_groups`) so an assistant message that
+        # declared tool_calls is never separated from its tool responses —
+        # summarizing one half of such a group away produces a message list
+        # the model API will reject as malformed. This means the kept
+        # portion can run a little over `window` when the boundary group is
+        # itself large; that's the correct trade-off over a well-formed cap.
+        groups = _tool_call_groups(body)
+        recent_groups: List[List[Dict[str, Any]]] = []
+        kept = 0
+        for group in reversed(groups):
+            recent_groups.insert(0, group)
+            kept += len(group)
+            if kept >= self.window:
+                break
+        recent = [msg for group in recent_groups for msg in group]
+        older = [
+            msg
+            for group in groups[: len(groups) - len(recent_groups)]
+            for msg in group
+        ]
         if not older:
             return system + recent
 
