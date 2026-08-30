@@ -115,7 +115,7 @@ Constructor-injection is the rule for anything with a dependency: an LLM, a
 tool registry, a compressor, an output guard, a memory manager are all passed
 into `__init__`, all with sensible defaults where a zero-setup path makes
 sense (`MockLLM`, `InMemorySessionStore`, `NoopMemoryExtractor`). Avoid
-module-level singletons except at the application boundary — `server.py`'s
+module-level singletons except at the application boundary — `app/server.py`'s
 handful of `REGISTRY` / `RAG_PIPELINE`-style globals are the accepted
 exception because a FastAPI app needs *some* place to hold process lifetime
 state; application logic itself should not reach for a global.
@@ -192,7 +192,7 @@ backend, a new provider, a new policy):
 4. Re-export the new names from the subpackage's `__init__.py` and from the
    top-level `agent/__init__.py`, keeping both the import block and
    `__all__` alphabetically sorted within their existing groups.
-5. Wire it into `server.py` behind an environment variable following the
+5. Wire it into `app/server.py` behind an environment variable following the
    `<THING>_DB_PATH` convention (see `RAG_DB_PATH`), defaulting to a real
    SQLite file under `data/`, not to in-memory — production should default
    to durable, tests should default to `InMemory*` or `:memory:`.

@@ -351,8 +351,9 @@ agent/
   eval/
     harness.py       runs tasks; rule-based + trajectory + LLM-as-judge scoring
     tasks.json       sample eval tasks with expected outcomes
-server.py            FastAPI app: /api/run, /api/stream, /api/tools, /api/rag/documents
-rag_ingest.py        CLI for local/batch RAG corpus ingestion
+app/                 ← entry points, run from the repo root
+  server.py          FastAPI app: /api/run, /api/stream, /api/tools, /api/rag/documents
+  rag_ingest.py      CLI for local/batch RAG corpus ingestion (python -m app.rag_ingest)
 examples/
   basic_tools.py         calculator + web-search-stub + datetime + memory_search tools
   context_compression.py query-aware context compression demo
@@ -610,7 +611,7 @@ ingest reviewed source metadata rather than relying on filenames alone.
 Corpus writes have separate management entry points. For local or batch import:
 
 ```bash
-python -m rag_ingest ./medical-guidelines \
+python -m app.rag_ingest ./medical-guidelines \
   --publisher "Chinese Medical Association" \
   --document-type guideline --jurisdiction CN --version 2026
 ```

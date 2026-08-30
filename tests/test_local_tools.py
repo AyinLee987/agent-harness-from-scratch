@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-import server
+from app import server
 from agent import (
     ListFilesTool, LocalToolConfig, ReadFileTool, RecoverableToolError,
     RunCommandTool, WriteFileTool, create_local_tools,

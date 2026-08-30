@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-import server
+from app import server
 from agent import LLMResponse, MockLLM, ToolCall, Usage
 
 

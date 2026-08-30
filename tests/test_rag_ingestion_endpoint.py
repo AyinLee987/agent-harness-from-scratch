@@ -5,7 +5,7 @@ import asyncio
 import pytest
 from fastapi import HTTPException
 
-import server
+from app import server
 from agent.rag import InMemoryRAGRepository, MedicalParentChildChunker, RAGIngestionService
 
 

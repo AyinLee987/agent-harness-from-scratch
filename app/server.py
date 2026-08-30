@@ -1,8 +1,8 @@
 """FastAPI server for the ReAct agent — sync + SSE streaming endpoints.
 
-Start with::
+Start with (from the repo root)::
 
-    uvicorn server:app --reload --host 0.0.0.0 --port 8000
+    uvicorn app.server:app --reload --host 0.0.0.0 --port 8000
 
 Endpoints
 ---------
@@ -20,15 +20,25 @@ import hmac
 import json
 import logging
 import os
+import sys
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path as _Path
 from typing import Any, AsyncGenerator, List, Optional, Sequence
+
+# This module lives at <repo root>/app/server.py — one level below the repo
+# root, where the `agent` package lives. Put the repo root on sys.path before
+# anything below imports `agent`, so this works whether it's launched as
+# `uvicorn app.server:app`, `python app/server.py`, or a debugger pointed
+# straight at this file (none of which reliably put the repo root there on
+# their own the way `python -m app.server` would).
+_REPO_ROOT = _Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from dotenv import load_dotenv
 
 load_dotenv()
-
-from pathlib import Path as _Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -166,7 +176,7 @@ def build_registry() -> ToolRegistry:
             ).split(",") if item.strip()
         )
         config = LocalToolConfig(
-            workspace_root=os.getenv("AGENT_WORKSPACE_ROOT", str(_Path(__file__).parent)),
+            workspace_root=os.getenv("AGENT_WORKSPACE_ROOT", str(_REPO_ROOT)),
             max_read_bytes=int(os.getenv("AGENT_FILE_MAX_READ_BYTES", str(2 * 1024 * 1024))),
             max_write_bytes=int(os.getenv("AGENT_FILE_MAX_WRITE_BYTES", str(2 * 1024 * 1024))),
             max_command_output_bytes=int(os.getenv("AGENT_CLI_MAX_OUTPUT_BYTES", str(256 * 1024))),
@@ -498,7 +508,7 @@ class RunResponse(BaseModel):
 @app.get("/", response_class=HTMLResponse)
 async def index():
     """Serve the Agent Playground UI."""
-    playground = _Path(__file__).parent / "web" / "playground.html"
+    playground = _REPO_ROOT / "web" / "playground.html"
     if not playground.exists():
         raise HTTPException(404, "playground.html not found")
     return HTMLResponse(playground.read_text(encoding="utf-8"))
@@ -837,8 +847,8 @@ def estimate_tokens_simple(text: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Main (for ``python server.py``)
+# Main (for ``python app/server.py``, run from the repo root)
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app.server:app", host="0.0.0.0", port=8000, reload=True)

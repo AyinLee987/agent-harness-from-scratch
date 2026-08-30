@@ -1,11 +1,23 @@
-"""Standalone command-line entry point for governed RAG corpus ingestion."""
+"""Standalone command-line entry point for governed RAG corpus ingestion.
+
+Run as ``python -m app.rag_ingest ...`` from the repo root (see README).
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
+
+# This module lives at <repo root>/app/rag_ingest.py — one level below the
+# repo root, where the `agent` package lives. `python -m app.rag_ingest`
+# already puts the repo root on sys.path; this also makes a direct
+# `python app/rag_ingest.py` invocation work.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from dotenv import load_dotenv
 
