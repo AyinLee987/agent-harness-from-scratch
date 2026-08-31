@@ -232,9 +232,30 @@ python examples/tool_scaling_multi_test.py
 
 Sample result (DeepSeek-chat, 50-tool registry): **14/14 exact tool-sequence
 matches (100%)**, answers correct too — chaining didn't move the needle
-either, at least for this model at this tool count. The natural next lever is
-tool count *beyond* 50 (or tighter overlap between tools), not task
-complexity.
+either, at least for this model at this tool count.
+
+Neither raised tool count nor chained calls surfaced degradation, so the
+last variable from the original framing — *description length*, independent
+of tool count — gets isolated next. `examples/tool_scaling_verbose_kit.py`
+wraps the same 50 tools (identical names/params/behavior) with descriptions
+padded ~6.5x longer using deliberately repetitive boilerplate (the realistic
+failure mode: a safety/usage paragraph pasted into every tool's docstring,
+which drowns each tool's actually-distinguishing text in near-identical
+filler). `examples/tool_scaling_verbose_test.py` reruns both the single-tool
+probe set and the 14-task chain against this verbose registry:
+
+```bash
+python examples/tool_scaling_verbose_test.py
+```
+
+Sample result (DeepSeek-chat, 50 tools, 14,705 → 94,975 schema chars, 6.5x):
+single-tool probe accuracy **100% (6/6)**, chain accuracy **100% (14/14)** —
+unchanged from the concise baseline. Across all three axes tested here (tool
+count to 50, chained calls, ~6.5x description bloat), this model/kit
+combination showed no measurable accuracy drop; the commonly cited
+degradation thresholds likely need a weaker model, a much larger tool count
+(100s), or genuinely ambiguous/overlapping tool *semantics* rather than
+verbose-but-still-distinguishable ones to reproduce here.
 
 ## Tool-output safety
 
