@@ -35,6 +35,13 @@ from typing import Any, AsyncGenerator, List, Optional, Sequence
 _REPO_ROOT = _Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+# Only needed for the opt-in tool_scaling_kit import in build_registry() below
+# (bare `tool_scaling_kit` / `tool_scaling_verbose_kit`, matching how the
+# examples/tool_scaling_*.py scripts import each other) — harmless to add
+# unconditionally since it's just a sys.path entry, not an import.
+_EXAMPLES_DIR = str(_REPO_ROOT / "examples")
+if _EXAMPLES_DIR not in sys.path:
+    sys.path.insert(0, _EXAMPLES_DIR)
 
 from dotenv import load_dotenv
 
@@ -194,6 +201,30 @@ def build_registry() -> ToolRegistry:
             file_tools_enabled=file_tools_enabled,
             cli_enabled=cli_enabled,
             allowed_command_count=len(allowed_commands),
+        )
+    scaling_kit_enabled = os.getenv("ENABLE_TOOL_SCALING_KIT", "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    if scaling_kit_enabled:
+        verbose = os.getenv("TOOL_SCALING_KIT_VERBOSE", "0").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        try:
+            size = int(os.getenv("TOOL_SCALING_KIT_SIZE", "50"))
+        except ValueError:
+            size = 50
+        if verbose:
+            from tool_scaling_verbose_kit import ALL_TOOLS_VERBOSE as _kit_tools
+        else:
+            from tool_scaling_kit import ALL_TOOLS as _kit_tools
+        size = max(1, min(size, len(_kit_tools)))
+        registry.register_many(_kit_tools[:size])
+        log_event(
+            logger,
+            logging.INFO,
+            "tool_scaling_kit.registered",
+            verbose=verbose,
+            tool_count=size,
         )
     return registry
 

@@ -257,6 +257,22 @@ degradation thresholds likely need a weaker model, a much larger tool count
 (100s), or genuinely ambiguous/overlapping tool *semantics* rather than
 verbose-but-still-distinguishable ones to reproduce here.
 
+### Trying the scaling kit live (web UI / API)
+
+The experiments above run standalone (`python examples/tool_scaling_*.py`) —
+by default the running agent server (`app/server.py`, what the web UI and
+`/api/*` talk to) still only has its normal handful of tools. To register
+the kit onto the *live* agent instead, set in `.env`:
+
+```bash
+ENABLE_TOOL_SCALING_KIT=1     # adds the kit's tools to the live registry
+TOOL_SCALING_KIT_VERBOSE=0    # 1 for the ~6.5x-longer descriptions
+TOOL_SCALING_KIT_SIZE=50      # how many of the 50 kit tools to register
+```
+
+Off by default — leave unset for normal use. Check what actually landed with
+`GET /api/tools`.
+
 ## Tool-output safety
 
 Tool results are untrusted input — a web page or API response can carry text like
