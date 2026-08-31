@@ -278,6 +278,44 @@ one: more tools in context correlated with the model reaching for an extra,
 redundant confirmation call. First measurable wobble across everything tested
 here, and it shows up in trajectory shape before it shows up in the answer.
 
+### Chain length, not just tool count
+
+Every chained task so far was 2 steps. `examples/tool_scaling_long_chain_tasks.json`
+adds 7 tasks with 3-5-step chains (e.g. sum → divide → round, or lowercase →
+snake_case → reverse → count → leap-year-check) to ask whether *chain length
+itself* — independent of registry size — is a lever:
+
+```bash
+python examples/tool_scaling_long_chain_test.py
+```
+
+Sample result (DeepSeek-chat, 100-tool registry): **6/7 (86%) exact
+tool-sequence matches**, broken down as 2/3 at length 3, 2/2 at length 4,
+2/2 at length 5 — length alone didn't produce a clean downward trend, but
+this is where the run produced two genuinely different failure shapes worth
+telling apart:
+
+- **A real trajectory miss**: a 3-step task asked whether a date was a
+  weekend; the model answered "**Yes**, it is a weekend (Sunday)" — correct
+  — but never called the required `calendar_is_weekend` tool, reasoning it
+  out from the weekday name instead. Right answer, wrong (shorter)
+  trajectory — the kind of thing that matters if you need the tool call
+  itself as an audit trail, not just a correct final string.
+- **A grading artifact, not a model failure**: a 5-step task's exact
+  tool-sequence matched perfectly, but the automated final-answer check
+  still counted it as wrong — because it looked for the literal string
+  `"false"` and the model's prose said "**No**, 18 is not a leap year"
+  instead. Manually verified: the tool chain and the underlying fact were
+  both correct end to end. This is a limitation of substring-based grading
+  (used throughout this repo's eval harness, not something new to this
+  script) mistaking a paraphrase for an error, not a model or tool-selection
+  problem. Re-graded by hand, final-answer accuracy for this run is 7/7.
+
+Net: at 3-5 step chains and 100 tools, the one real miss was a *skipped*
+tool call the model judged unnecessary, not a *wrong* one — a different
+failure mode than the "picks the wrong name" story the tool-count framing
+usually predicts.
+
 ### Trying the scaling kit live (web UI / API)
 
 The experiments above run standalone (`python examples/tool_scaling_*.py`) —
