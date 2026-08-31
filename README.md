@@ -219,6 +219,23 @@ against the common "~20 tools" folklore threshold, which appears to bite
 sooner mainly with smaller/weaker models, far larger tool counts (100s), or
 tools with even closer name/argument overlap than this kit's.
 
+Single-tool selection is the easy case, though. `examples/tool_scaling_multi_test.py`
+raises the bar with **chained** tasks against the same 50-tool registry —
+`examples/tool_scaling_multi_tasks.json` has 14 tasks each requiring 2+ tool
+calls in a specific order (some reusing the *same* tool twice, e.g. "add 12
+and 8, then add 15 to that"), where one wrong pick anywhere in the chain
+fails the whole trajectory:
+
+```bash
+python examples/tool_scaling_multi_test.py
+```
+
+Sample result (DeepSeek-chat, 50-tool registry): **14/14 exact tool-sequence
+matches (100%)**, answers correct too — chaining didn't move the needle
+either, at least for this model at this tool count. The natural next lever is
+tool count *beyond* 50 (or tighter overlap between tools), not task
+complexity.
+
 ## Tool-output safety
 
 Tool results are untrusted input — a web page or API response can carry text like

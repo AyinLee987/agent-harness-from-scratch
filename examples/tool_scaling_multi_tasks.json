@@ -1,0 +1,86 @@
+[
+  {
+    "id": "convert_then_round",
+    "prompt": "Convert 10 kilometers to miles, then round the result to 1 decimal place.",
+    "expect_tool_sequence": ["convert_km_to_miles", "math_round"],
+    "expect_substrings": ["6.2"]
+  },
+  {
+    "id": "lower_then_vowels",
+    "prompt": "Convert 'Hello World' to lowercase, then count how many vowels are in the result.",
+    "expect_tool_sequence": ["text_lowercase", "text_count_vowels"],
+    "expect_substrings": ["3"]
+  },
+  {
+    "id": "add_days_then_weekday",
+    "prompt": "Add 10 days to 2026-08-31, then tell me what day of the week the new date falls on.",
+    "expect_tool_sequence": ["date_add_days", "date_day_of_week"],
+    "expect_substrings": ["Thursday"]
+  },
+  {
+    "id": "celsius_roundtrip",
+    "prompt": "Convert 100 degrees Celsius to Fahrenheit, then convert that result back to Celsius.",
+    "expect_tool_sequence": ["convert_celsius_to_fahrenheit", "convert_fahrenheit_to_celsius"],
+    "expect_substrings": ["100"]
+  },
+  {
+    "id": "add_twice",
+    "prompt": "What is 12 plus 8? Take that result and add 15 to it.",
+    "expect_tool_sequence": ["math_add", "math_add"],
+    "expect_substrings": ["35"]
+  },
+  {
+    "id": "upper_then_reverse",
+    "prompt": "Convert 'agent' to uppercase, then reverse the result.",
+    "expect_tool_sequence": ["text_uppercase", "text_reverse"],
+    "expect_substrings": ["TNEGA"]
+  },
+  {
+    "id": "multiply_twice",
+    "prompt": "Multiply 3 by 4. Then multiply that result by 5.",
+    "expect_tool_sequence": ["math_multiply", "math_multiply"],
+    "expect_substrings": ["60"]
+  },
+  {
+    "id": "base64_roundtrip",
+    "prompt": "Base64-encode the word 'agent', then decode your own result back to plain text.",
+    "expect_tool_sequence": ["data_base64_encode", "data_base64_decode"],
+    "expect_substrings": ["agent"]
+  },
+  {
+    "id": "add_days_then_days_between",
+    "prompt": "Take 2026-01-01 and add 100 days to it. Then tell me how many days are between that new date and 2026-12-31.",
+    "expect_tool_sequence": ["date_add_days", "date_days_between"],
+    "expect_substrings": ["264"]
+  },
+  {
+    "id": "kg_to_lb_then_round",
+    "prompt": "Convert 7 kilograms to pounds, then round the result to the nearest whole number.",
+    "expect_tool_sequence": ["convert_kg_to_lbs", "math_round"],
+    "expect_substrings": ["15"]
+  },
+  {
+    "id": "replace_then_wordcount",
+    "prompt": "In the sentence 'I love cats and cats love me', replace 'cats' with 'dogs', then count how many words are in the result.",
+    "expect_tool_sequence": ["text_replace", "text_word_count"],
+    "expect_substrings": ["7"]
+  },
+  {
+    "id": "average_then_round",
+    "prompt": "Compute the average of 2, 3, 5, and 7, then round it to 1 decimal place.",
+    "expect_tool_sequence": ["math_average", "math_round"],
+    "expect_substrings": ["4.2"]
+  },
+  {
+    "id": "dedupe_then_sort",
+    "prompt": "Remove duplicate entries from this list, keeping order: b,a,c,a,b -- then sort what's left alphabetically.",
+    "expect_tool_sequence": ["data_dedupe_list", "data_sort_list"],
+    "expect_substrings": ["a,b,c"]
+  },
+  {
+    "id": "add_days_twice",
+    "prompt": "Add 5 days to 2026-01-01. Then add another 20 days to that new date.",
+    "expect_tool_sequence": ["date_add_days", "date_add_days"],
+    "expect_substrings": ["2026-01-26"]
+  }
+]
