@@ -202,9 +202,22 @@ def build_registry() -> ToolRegistry:
             cli_enabled=cli_enabled,
             allowed_command_count=len(allowed_commands),
         )
-    scaling_kit_enabled = os.getenv("ENABLE_TOOL_SCALING_KIT", "0").strip().lower() in {
+    _raw_scaling_flag = os.getenv("ENABLE_TOOL_SCALING_KIT", "0")
+    scaling_kit_enabled = _raw_scaling_flag.strip().lower() in {
         "1", "true", "yes", "on",
     }
+    # Always log this decision (not just when enabled) -- the raw value is
+    # included so a stale process env (e.g. a debugger session started
+    # before an .env edit, or a launcher that pre-populates os.environ from
+    # its own cached copy) is visible in the logs instead of silently
+    # looking like the kit was never wired in at all.
+    log_event(
+        logger,
+        logging.INFO,
+        "tool_scaling_kit.flag_read",
+        raw_value=_raw_scaling_flag,
+        enabled=scaling_kit_enabled,
+    )
     if scaling_kit_enabled:
         verbose = os.getenv("TOOL_SCALING_KIT_VERBOSE", "0").strip().lower() in {
             "1", "true", "yes", "on",
