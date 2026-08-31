@@ -10,7 +10,7 @@ Method
 ------
 A fixed set of *probe* tasks (one prompt each, spanning several tool
 categories) is run repeatedly, unchanged, while the surrounding tool
-registry grows from a handful of tools up to the full 50-tool kit in
+registry grows from a handful of tools up to the full 100-tool kit in
 ``tool_scaling_kit.py``. The probe tools are always present; the *extra*
 tools added at each step are pure distractors -- same shape (name +
 docstring + JSON schema), never the right answer. If accuracy holds flat
@@ -21,7 +21,7 @@ Usage
 -----
     python examples/tool_scaling_test.py                  # DeepSeek by default
     python examples/tool_scaling_test.py --provider bailian
-    python examples/tool_scaling_test.py --sizes 6,15,25,35,50
+    python examples/tool_scaling_test.py --sizes 6,15,25,35,50,75,100
     python examples/tool_scaling_test.py --dump results.json
 
 Requires a real LLM (DEEPSEEK_API_KEY or BAILIAN_API_KEY or OPENAI_API_KEY in
@@ -62,7 +62,7 @@ PROBE_TASK_IDS = [
     "text_is_palindrome",
 ]
 
-DEFAULT_SIZES = [6, 15, 25, 35, 50]
+DEFAULT_SIZES = [6, 15, 25, 35, 50, 75, 100]
 
 
 def _make_llm(provider: str):
@@ -172,7 +172,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Tool-count vs tool-calling-accuracy sweep.")
     parser.add_argument("--provider", default="deepseek", choices=["deepseek", "bailian", "openai"])
     parser.add_argument("--sizes", default=",".join(str(s) for s in DEFAULT_SIZES),
-                         help="Comma-separated registry sizes to test, e.g. 6,15,25,35,50")
+                         help="Comma-separated registry sizes to test, e.g. 6,15,25,35,50,75,100")
     parser.add_argument("--delay", type=float, default=0.2, help="Seconds to sleep between API calls.")
     parser.add_argument("--dump", metavar="PATH", help="Write full results JSON to PATH.")
     args = parser.parse_args()

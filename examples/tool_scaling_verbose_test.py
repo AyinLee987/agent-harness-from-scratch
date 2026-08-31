@@ -1,11 +1,12 @@
-"""Verbose-description accuracy test: same 50 tools, ~6.5x longer descriptions.
+"""Verbose-description accuracy test: same tool count, ~6.5x longer descriptions.
 
 Neither raw tool count (``tool_scaling_test.py``, 50 tools, 100% accuracy)
 nor call-chain length (``tool_scaling_multi_test.py``, 14 chained tasks,
 100% accuracy) moved the needle for DeepSeek-chat. This script isolates the
 other half of the original interview framing -- "too many tools -> tool
 *descriptions* get long -> that's what actually hurts accuracy" -- by
-holding tool count fixed at 50 and swapping in
+holding tool count fixed at whatever ``tool_scaling_kit.ALL_TOOLS`` currently
+is (originally 50, now 100) and swapping in
 ``tool_scaling_verbose_kit.ALL_TOOLS_VERBOSE``, whose descriptions carry
 ~6.5x more (deliberately repetitive boilerplate) text than the concise kit,
 while every name/parameter/behavior stays identical.
@@ -14,7 +15,7 @@ Runs both:
   1. The same 6 single-tool probe tasks used in tool_scaling_test.py.
   2. All 14 chained tasks from tool_scaling_multi_test.py.
 
-...against the verbose 50-tool registry, so results are directly comparable
+...against the full verbose registry, so results are directly comparable
 to the concise-kit numbers already recorded in the README.
 
 Usage
@@ -133,7 +134,7 @@ def main() -> None:
     registry = ToolRegistry(ALL_TOOLS_VERBOSE)
 
     print("=" * 74)
-    print(f"VERBOSE-DESCRIPTION ACCURACY TEST  (provider={args.provider}, 50 tools)")
+    print(f"VERBOSE-DESCRIPTION ACCURACY TEST  (provider={args.provider}, {len(ALL_TOOLS)} tools)")
     print(f"Schema size: concise={concise_chars} chars vs verbose={verbose_chars} chars "
           f"({verbose_chars / concise_chars:.1f}x)")
     print("=" * 74)

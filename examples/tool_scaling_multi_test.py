@@ -1,17 +1,19 @@
 """Multi-tool-call accuracy test: harder than single-tool selection.
 
 ``tool_scaling_test.py`` showed 100% single-tool selection accuracy for
-DeepSeek-chat all the way to the full 50-tool kit. Single-tool tasks only
-ask the model to pick *one* correct name out of the registry once. A chained
-task asks it to do that correctly *multiple times in a row*, sometimes with
-the same tool twice (e.g. add, then add again) -- errors compound across
-steps, so this is a stricter probe of the same underlying question before
-reaching for "just add more tools" as the next lever.
+DeepSeek-chat all the way to the full kit (originally 50 tools, now 100).
+Single-tool tasks only ask the model to pick *one* correct name out of the
+registry once. A chained task asks it to do that correctly *multiple times
+in a row*, sometimes with the same tool twice (e.g. add, then add again) --
+errors compound across steps, so this is a stricter probe of the same
+underlying question before reaching for "just add more tools" as the next
+lever.
 
 Loads ``tool_scaling_multi_tasks.json`` (14 tasks, each with an
 ``expect_tool_sequence`` -- the ordered, duplicates-allowed list of tool
 calls a correct trajectory must contain) and runs them against the full
-50-tool kit from ``tool_scaling_kit.py``.
+kit from ``tool_scaling_kit.py`` (all of ``ALL_TOOLS``, whatever size that
+currently is).
 
 Scoring per task:
     exact_sequence_match -- the actual tool-call names, in order, equal
@@ -69,7 +71,7 @@ def _load_tasks() -> list[dict]:
 
 def run(provider: str, max_steps: int, delay: float) -> dict:
     tasks = _load_tasks()
-    registry = ToolRegistry(ALL_TOOLS)  # full 50-tool kit -- the current project size
+    registry = ToolRegistry(ALL_TOOLS)  # the full kit -- the current project tool count
     tool_names = {t.name for t in ALL_TOOLS}
     for task in tasks:
         unknown = [t for t in task["expect_tool_sequence"] if t not in tool_names]

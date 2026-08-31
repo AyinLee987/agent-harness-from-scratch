@@ -1,8 +1,8 @@
-"""Tests for the 50-tool scaling kit (examples/tool_scaling_kit.py).
+"""Tests for the 100-tool scaling kit (examples/tool_scaling_kit.py).
 
 Two layers:
 
-1. Deterministic, free, always-run: the kit itself is well-formed (50 unique
+1. Deterministic, free, always-run: the kit itself is well-formed (100 unique
    tools, valid schemas) and each tool's ``run()`` produces the exact
    expected output -- this is ordinary unit testing of the new tools.
 2. Real-LLM tool-*selection* accuracy: skipped unless an API key is
@@ -50,9 +50,9 @@ def _load_tasks() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def test_kit_has_exactly_50_uniquely_named_tools():
-    assert len(ALL_TOOLS) == 50
-    assert len({t.name for t in ALL_TOOLS}) == 50
+def test_kit_has_exactly_100_uniquely_named_tools():
+    assert len(ALL_TOOLS) == 100
+    assert len({t.name for t in ALL_TOOLS}) == 100
 
 
 def test_every_tool_has_a_description_and_valid_schema():
@@ -73,12 +73,12 @@ def test_build_registry_takes_a_stable_prefix_slice():
     with pytest.raises(ValueError):
         build_registry(0)
     with pytest.raises(ValueError):
-        build_registry(51)
+        build_registry(101)
 
 
 def test_tasks_file_covers_every_tool_exactly_once_in_matching_order():
     tasks = _load_tasks()
-    assert len(tasks) == 50
+    assert len(tasks) == 100
     assert [t["expect_tool"] for t in tasks] == [tool.name for tool in ALL_TOOLS]
 
 
@@ -126,8 +126,8 @@ def _make_live_llm():
 
 
 @pytest.mark.skipif(not HAS_LIVE_LLM, reason="No DEEPSEEK_API_KEY/BAILIAN_API_KEY/OPENAI_API_KEY set")
-def test_tool_selection_accuracy_with_full_50_tool_registry():
-    """Smoke check: with all 50 tools registered, a small sample of tasks
+def test_tool_selection_accuracy_with_full_100_tool_registry():
+    """Smoke check: with all 100 tools registered, a small sample of tasks
     should still resolve to the *correct* tool most of the time. This is a
     coarse pass/fail gate, not the full sweep -- run
     ``examples/tool_scaling_test.py`` for the size-by-size accuracy curve.
@@ -154,6 +154,6 @@ def test_tool_selection_accuracy_with_full_50_tool_registry():
     accuracy = correct / len(sample)
     # A generous floor: this is a smoke test, not the accuracy benchmark.
     assert accuracy >= 0.6, (
-        f"Tool-selection accuracy with 50 tools registered was {accuracy:.0%}, "
+        f"Tool-selection accuracy with 100 tools registered was {accuracy:.0%}, "
         f"below the 60% smoke-test floor."
     )

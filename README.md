@@ -250,12 +250,33 @@ python examples/tool_scaling_verbose_test.py
 
 Sample result (DeepSeek-chat, 50 tools, 14,705 → 94,975 schema chars, 6.5x):
 single-tool probe accuracy **100% (6/6)**, chain accuracy **100% (14/14)** —
-unchanged from the concise baseline. Across all three axes tested here (tool
-count to 50, chained calls, ~6.5x description bloat), this model/kit
-combination showed no measurable accuracy drop; the commonly cited
-degradation thresholds likely need a weaker model, a much larger tool count
-(100s), or genuinely ambiguous/overlapping tool *semantics* rather than
-verbose-but-still-distinguishable ones to reproduce here.
+unchanged from the concise baseline. Across all three axes tested at 50
+tools (tool count, chained calls, ~6.5x description bloat), this model/kit
+combination showed no measurable accuracy drop.
+
+### Pushing tool count to 100
+
+The kit was doubled to **100 tools** (five more categories — `stat_*`,
+`format_*`, `calendar_*`, `measure_*`, `encode_*` — each extending an
+existing category's spirit, e.g. `stat_median`/`stat_stdev` alongside
+`math_average`) to see if 50 simply wasn't enough tools to bite. Rerunning
+both experiments at the new size:
+
+```bash
+python examples/tool_scaling_test.py --sizes 6,15,25,35,50,75,100
+python examples/tool_scaling_multi_test.py
+```
+
+Single-tool probe accuracy: still **100%** at every size up to 100. The
+multi-tool chain, though, cracked slightly: **13/14 (93%) exact tool-sequence
+matches** — one task (add 5 days, then add 20 more) had the model insert an
+unrequested *third* `date_add_days` call as a self-check ("Verified: 5 + 20 =
+25 days total, which also gives the same date") before answering. The final
+answer was still correct (**14/14, 100%** on final-answer accuracy), so this
+isn't a wrong-tool-selection failure — it's an efficiency/trajectory-cleanliness
+one: more tools in context correlated with the model reaching for an extra,
+redundant confirmation call. First measurable wobble across everything tested
+here, and it shows up in trajectory shape before it shows up in the answer.
 
 ### Trying the scaling kit live (web UI / API)
 
@@ -267,7 +288,7 @@ the kit onto the *live* agent instead, set in `.env`:
 ```bash
 ENABLE_TOOL_SCALING_KIT=1     # adds the kit's tools to the live registry
 TOOL_SCALING_KIT_VERBOSE=0    # 1 for the ~6.5x-longer descriptions
-TOOL_SCALING_KIT_SIZE=50      # how many of the 50 kit tools to register
+TOOL_SCALING_KIT_SIZE=100     # how many of the 100 kit tools to register
 ```
 
 Off by default — leave unset for normal use. Check what actually landed with

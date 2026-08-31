@@ -1,15 +1,15 @@
-"""A verbose-description variant of the 50-tool kit.
+"""A verbose-description variant of the tool_scaling_kit.
 
 Isolates a different axis from ``tool_scaling_kit.py``: not "how many
 tools", but "how long is each tool's description" -- the original framing
 of the interview question this whole experiment answers ("tool 太多导致
 description 太长, 导致模型调用工具准确率降低"). Tool *count* stays fixed
-at 50 and every name/parameter/behavior is identical to the concise kit;
-only ``description`` is bloated, by wrapping each concise tool in
-:class:`VerboseTool`.
+at whatever ``ALL_TOOLS`` currently is and every name/parameter/behavior is
+identical to the concise kit; only ``description`` is bloated, by wrapping
+each concise tool in :class:`VerboseTool`.
 
 The padding is deliberately generic boilerplate (safety notes, usage
-guidance, performance claims) repeated near-verbatim across all 50 tools --
+guidance, performance claims) repeated near-verbatim across every tool --
 that is itself realistic: this is exactly how tool docs bloat in practice
 (a compliance/safety paragraph gets pasted into every tool's docstring).
 The practical effect on the model is the opposite of helpful information
@@ -103,7 +103,7 @@ class VerboseTool(BaseTool):
 
 ALL_TOOLS_VERBOSE = [VerboseTool(t) for t in ALL_TOOLS]
 
-assert len(ALL_TOOLS_VERBOSE) == 50
+assert len(ALL_TOOLS_VERBOSE) == len(ALL_TOOLS)
 assert {t.name for t in ALL_TOOLS_VERBOSE} == {t.name for t in ALL_TOOLS}
 
 
@@ -115,8 +115,8 @@ def _schema_chars(tools) -> int:
 def main() -> None:
     concise_chars = _schema_chars(ALL_TOOLS)
     verbose_chars = _schema_chars(ALL_TOOLS_VERBOSE)
-    print(f"Concise 50-tool schema:  {concise_chars:>7} chars  (~{concise_chars // 4} tokens)")
-    print(f"Verbose 50-tool schema:  {verbose_chars:>7} chars  (~{verbose_chars // 4} tokens)")
+    print(f"Concise {len(ALL_TOOLS)}-tool schema:  {concise_chars:>7} chars  (~{concise_chars // 4} tokens)")
+    print(f"Verbose {len(ALL_TOOLS_VERBOSE)}-tool schema:  {verbose_chars:>7} chars  (~{verbose_chars // 4} tokens)")
     print(f"Growth: {verbose_chars / concise_chars:.1f}x")
 
 

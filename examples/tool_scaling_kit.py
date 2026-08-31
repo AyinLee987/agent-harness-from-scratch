@@ -1,23 +1,32 @@
-"""A 50-tool kit for the tool-count-vs-accuracy scaling experiment.
+"""A 100-tool kit for the tool-count-vs-accuracy scaling experiment.
 
 Context: the standard advice on "how many tools before an LLM's tool-calling
 accuracy degrades" is that noticeable drop-off starts around 15-20 tools and
 gets severe past 50-100, especially once tools have overlapping names/
 descriptions (see the Anthropic "Writing effective tools for agents" blog
 post and public MCP tool-overload write-ups). This module builds a
-deliberately *realistic* 50-tool catalog to let ``tool_scaling_test.py``
+deliberately *realistic* tool catalog to let ``tool_scaling_test.py``
 measure that curve directly against a real LLM instead of citing numbers.
 
-Design: five categories of ten tools each. Within a category, tools are
+Design: ten categories of ten tools each. Within a category, tools are
 intentionally close in name/purpose (e.g. ``celsius_to_fahrenheit`` vs
 ``fahrenheit_to_celsius``) -- this is what actually confuses tool selection
-in production, more than raw count alone.
+in production, more than raw count alone. The first five categories were the
+original 50-tool kit; the second five extend the same categories' *spirit*
+(more stats, more text formatting, more date arithmetic, more unit
+conversions, more encoding) so the later half of the registry is just as
+plausibly-real as the first, not padding.
 
     math_*       -- 10 arithmetic/statistics ops
     text_*       -- 10 string ops
     date_*       -- 10 date/time ops
     convert_*    -- 10 unit conversions
     data_*       -- 10 encoding/misc utility ops
+    stat_*       -- 10 more statistics ops (extends math_*)
+    format_*     -- 10 more text-formatting ops (extends text_*)
+    calendar_*   -- 10 more date/calendar ops (extends date_*)
+    measure_*    -- 10 more unit conversions (extends convert_*)
+    encode_*     -- 10 more encoding/hashing ops (extends data_*)
 
 Every tool is pure and dependency-free so the kit runs anywhere.
 """
@@ -25,9 +34,13 @@ Every tool is pure and dependency-free so the kit runs anywhere.
 from __future__ import annotations
 
 import base64
+import calendar as _calendar
+import codecs
+import hashlib
 import json
 import math
 import random
+import re
 import statistics
 import urllib.parse
 import uuid
@@ -621,6 +634,624 @@ def data_char_frequency(text: str, character: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Category 6: stat_* (10) -- extends math_*
+# ---------------------------------------------------------------------------
+
+
+@tool
+def stat_median(numbers: str) -> str:
+    """Compute the median of a comma-separated list of numbers.
+
+    Args:
+        numbers: Comma-separated numbers, e.g. '3,1,2'.
+    """
+    values = _parse_numbers(numbers)
+    return _num(statistics.median(values)) if values else "No numbers given."
+
+
+@tool
+def stat_stdev(numbers: str) -> str:
+    """Compute the sample standard deviation of a comma-separated list of numbers.
+
+    Args:
+        numbers: Comma-separated numbers, at least two values.
+    """
+    values = _parse_numbers(numbers)
+    if len(values) < 2:
+        return "Need at least two numbers."
+    return _num(statistics.stdev(values))
+
+
+@tool
+def stat_variance(numbers: str) -> str:
+    """Compute the sample variance of a comma-separated list of numbers.
+
+    Args:
+        numbers: Comma-separated numbers, at least two values.
+    """
+    values = _parse_numbers(numbers)
+    if len(values) < 2:
+        return "Need at least two numbers."
+    return _num(statistics.variance(values))
+
+
+@tool
+def stat_sum(numbers: str) -> str:
+    """Compute the sum of a comma-separated list of numbers.
+
+    Args:
+        numbers: Comma-separated numbers, e.g. '1,2,3,4'.
+    """
+    values = _parse_numbers(numbers)
+    return _num(sum(values)) if values else "No numbers given."
+
+
+@tool
+def stat_product(numbers: str) -> str:
+    """Compute the product of a comma-separated list of numbers.
+
+    Args:
+        numbers: Comma-separated numbers, e.g. '1,2,3,4'.
+    """
+    values = _parse_numbers(numbers)
+    return _num(math.prod(values)) if values else "No numbers given."
+
+
+@tool
+def stat_range(numbers: str) -> str:
+    """Compute the range (max minus min) of a comma-separated list of numbers.
+
+    Args:
+        numbers: Comma-separated numbers, e.g. '5,2,9,1'.
+    """
+    values = _parse_numbers(numbers)
+    return _num(max(values) - min(values)) if values else "No numbers given."
+
+
+@tool
+def stat_count(numbers: str) -> str:
+    """Count how many numbers are in a comma-separated list.
+
+    Args:
+        numbers: Comma-separated numbers, e.g. '5,2,9,1,3'.
+    """
+    return str(len(_parse_numbers(numbers)))
+
+
+@tool
+def stat_mode(numbers: str) -> str:
+    """Find the most frequently occurring value in a comma-separated list of numbers.
+
+    Args:
+        numbers: Comma-separated numbers, e.g. '1,2,2,3'.
+    """
+    values = _parse_numbers(numbers)
+    return _num(statistics.mode(values)) if values else "No numbers given."
+
+
+@tool
+def stat_percentile(numbers: str, percentile: float) -> str:
+    """Compute a percentile (0-100) of a comma-separated list of numbers using linear interpolation.
+
+    Args:
+        numbers: Comma-separated numbers.
+        percentile: Percentile to compute, between 0 and 100.
+    """
+    values = sorted(_parse_numbers(numbers))
+    if not values:
+        return "No numbers given."
+    if not 0 <= percentile <= 100:
+        return "percentile must be between 0 and 100."
+    idx = percentile / 100 * (len(values) - 1)
+    lo = int(idx)
+    hi = min(lo + 1, len(values) - 1)
+    frac = idx - lo
+    return _num(values[lo] + (values[hi] - values[lo]) * frac)
+
+
+@tool
+def stat_normalize(numbers: str) -> str:
+    """Min-max normalize a comma-separated list of numbers to the 0-1 range.
+
+    Args:
+        numbers: Comma-separated numbers, e.g. '1,2,3,4,5'.
+    """
+    values = _parse_numbers(numbers)
+    if not values:
+        return "No numbers given."
+    lo, hi = min(values), max(values)
+    if lo == hi:
+        return ",".join(_num(0) for _ in values)
+    return ",".join(_num((v - lo) / (hi - lo)) for v in values)
+
+
+# ---------------------------------------------------------------------------
+# Category 7: format_* (10) -- extends text_*
+# ---------------------------------------------------------------------------
+
+
+@tool
+def format_snake_case(text: str) -> str:
+    """Convert text to snake_case.
+
+    Args:
+        text: The text to convert.
+    """
+    return "_".join(text.split()).lower()
+
+
+@tool
+def format_camel_case(text: str) -> str:
+    """Convert text to camelCase.
+
+    Args:
+        text: The text to convert.
+    """
+    words = text.split()
+    if not words:
+        return ""
+    return words[0].lower() + "".join(w.capitalize() for w in words[1:])
+
+
+@tool
+def format_kebab_case(text: str) -> str:
+    """Convert text to kebab-case.
+
+    Args:
+        text: The text to convert.
+    """
+    return "-".join(text.split()).lower()
+
+
+@tool
+def format_capitalize_first(text: str) -> str:
+    """Capitalize only the first letter of text, leaving the rest unchanged.
+
+    Args:
+        text: The text to convert.
+    """
+    return text[:1].upper() + text[1:] if text else text
+
+
+@tool
+def format_remove_punctuation(text: str) -> str:
+    """Remove punctuation characters from text, keeping letters, digits, and spaces.
+
+    Args:
+        text: The text to strip.
+    """
+    return re.sub(r"[^\w\s]", "", text)
+
+
+@tool
+def format_truncate(text: str, max_length: int) -> str:
+    """Truncate text to a maximum length, appending '...' if it was cut.
+
+    Args:
+        text: The text to truncate.
+        max_length: Maximum number of characters to keep before the ellipsis.
+    """
+    if len(text) <= max_length:
+        return text
+    return text[:max_length] + "..."
+
+
+@tool
+def format_pad_left(text: str, width: int, pad_char: str = " ") -> str:
+    """Pad text on the left with a character until it reaches a given width.
+
+    Args:
+        text: The text to pad.
+        width: Target total length.
+        pad_char: Single character to pad with; default a space.
+    """
+    return text.rjust(width, pad_char or " ")
+
+
+@tool
+def format_pad_right(text: str, width: int, pad_char: str = " ") -> str:
+    """Pad text on the right with a character until it reaches a given width.
+
+    Args:
+        text: The text to pad.
+        width: Target total length.
+        pad_char: Single character to pad with; default a space.
+    """
+    return text.ljust(width, pad_char or " ")
+
+
+@tool
+def format_repeat(text: str, times: int) -> str:
+    """Repeat text a given number of times, concatenated with no separator.
+
+    Args:
+        text: The text to repeat.
+        times: Number of repetitions.
+    """
+    return text * times
+
+
+@tool
+def format_slugify(text: str) -> str:
+    """Convert text into a lowercase, hyphen-separated URL slug.
+
+    Args:
+        text: The text to slugify.
+    """
+    cleaned = re.sub(r"[^\w\s-]", "", text).strip().lower()
+    return re.sub(r"[\s]+", "-", cleaned)
+
+
+# ---------------------------------------------------------------------------
+# Category 8: calendar_* (10) -- extends date_*
+# ---------------------------------------------------------------------------
+
+
+@tool
+def calendar_month_name(month: int) -> str:
+    """Return the full name of a month given its number (1-12).
+
+    Args:
+        month: Month number, 1-12.
+    """
+    if not 1 <= month <= 12:
+        return "month must be between 1 and 12."
+    return datetime(2000, month, 1).strftime("%B")
+
+
+@tool
+def calendar_days_in_month(year: int, month: int) -> str:
+    """Return how many days are in a given month of a given year.
+
+    Args:
+        year: The four-digit year.
+        month: Month number, 1-12.
+    """
+    if not 1 <= month <= 12:
+        return "month must be between 1 and 12."
+    return str(_calendar.monthrange(year, month)[1])
+
+
+@tool
+def calendar_is_weekend(date: str) -> str:
+    """Check whether a date falls on a Saturday or Sunday.
+
+    Args:
+        date: Date in YYYY-MM-DD format.
+    """
+    try:
+        parsed = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return f"Could not parse date: {date}"
+    return "true" if parsed.weekday() >= 5 else "false"
+
+
+@tool
+def calendar_next_weekday(date: str, weekday_name: str) -> str:
+    """Find the next occurrence of a named weekday strictly after a date.
+
+    Args:
+        date: Date in YYYY-MM-DD format.
+        weekday_name: Full weekday name, e.g. 'Friday'.
+    """
+    try:
+        parsed = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return f"Could not parse date: {date}"
+    names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    try:
+        target = names.index(weekday_name.strip().capitalize())
+    except ValueError:
+        return f"Unknown weekday name: {weekday_name}"
+    days_ahead = (target - parsed.weekday()) % 7
+    days_ahead = days_ahead or 7
+    return (parsed + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+
+
+@tool
+def calendar_week_number(date: str) -> str:
+    """Return the ISO-8601 week number (1-53) for a date.
+
+    Args:
+        date: Date in YYYY-MM-DD format.
+    """
+    try:
+        parsed = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return f"Could not parse date: {date}"
+    return str(parsed.isocalendar()[1])
+
+
+@tool
+def calendar_start_of_month(date: str) -> str:
+    """Return the first day of the month containing a date.
+
+    Args:
+        date: Date in YYYY-MM-DD format.
+    """
+    try:
+        parsed = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return f"Could not parse date: {date}"
+    return parsed.replace(day=1).strftime("%Y-%m-%d")
+
+
+@tool
+def calendar_end_of_month(date: str) -> str:
+    """Return the last day of the month containing a date.
+
+    Args:
+        date: Date in YYYY-MM-DD format.
+    """
+    try:
+        parsed = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return f"Could not parse date: {date}"
+    last_day = _calendar.monthrange(parsed.year, parsed.month)[1]
+    return parsed.replace(day=last_day).strftime("%Y-%m-%d")
+
+
+@tool
+def calendar_age_in_years(birth_date: str, as_of_date: str) -> str:
+    """Compute a whole-years age given a birth date and an as-of date.
+
+    Args:
+        birth_date: Birth date in YYYY-MM-DD format.
+        as_of_date: Date to compute the age as of, in YYYY-MM-DD format.
+    """
+    try:
+        birth = datetime.strptime(birth_date, "%Y-%m-%d")
+        as_of = datetime.strptime(as_of_date, "%Y-%m-%d")
+    except ValueError:
+        return "Could not parse one of the dates."
+    years = as_of.year - birth.year
+    if (as_of.month, as_of.day) < (birth.month, birth.day):
+        years -= 1
+    return str(years)
+
+
+@tool
+def calendar_subtract_days(date: str, days: int) -> str:
+    """Subtract a number of days from a date.
+
+    Args:
+        date: Date in YYYY-MM-DD format.
+        days: Number of days to subtract (must be non-negative).
+    """
+    try:
+        parsed = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return f"Could not parse date: {date}"
+    return (parsed - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+@tool
+def calendar_is_same_day(date_a: str, date_b: str) -> str:
+    """Check whether two YYYY-MM-DD dates are the same calendar day.
+
+    Args:
+        date_a: First date in YYYY-MM-DD format.
+        date_b: Second date in YYYY-MM-DD format.
+    """
+    return "true" if date_a.strip() == date_b.strip() else "false"
+
+
+# ---------------------------------------------------------------------------
+# Category 9: measure_* (10) -- extends convert_*
+# ---------------------------------------------------------------------------
+
+
+@tool
+def measure_miles_to_nautical_miles(miles: float) -> str:
+    """Convert a distance from statute miles to nautical miles.
+
+    Args:
+        miles: Distance in statute miles.
+    """
+    return _num(miles * 0.868976)
+
+
+@tool
+def measure_nautical_miles_to_miles(nautical_miles: float) -> str:
+    """Convert a distance from nautical miles to statute miles.
+
+    Args:
+        nautical_miles: Distance in nautical miles.
+    """
+    return _num(nautical_miles * 1.15078)
+
+
+@tool
+def measure_acres_to_hectares(acres: float) -> str:
+    """Convert an area from acres to hectares.
+
+    Args:
+        acres: Area in acres.
+    """
+    return _num(acres * 0.404686)
+
+
+@tool
+def measure_hectares_to_acres(hectares: float) -> str:
+    """Convert an area from hectares to acres.
+
+    Args:
+        hectares: Area in hectares.
+    """
+    return _num(hectares * 2.47105)
+
+
+@tool
+def measure_sqft_to_sqm(square_feet: float) -> str:
+    """Convert an area from square feet to square meters.
+
+    Args:
+        square_feet: Area in square feet.
+    """
+    return _num(square_feet * 0.092903)
+
+
+@tool
+def measure_sqm_to_sqft(square_meters: float) -> str:
+    """Convert an area from square meters to square feet.
+
+    Args:
+        square_meters: Area in square meters.
+    """
+    return _num(square_meters * 10.7639)
+
+
+@tool
+def measure_mph_to_kmh(mph: float) -> str:
+    """Convert a speed from miles per hour to kilometers per hour.
+
+    Args:
+        mph: Speed in miles per hour.
+    """
+    return _num(mph * 1.60934)
+
+
+@tool
+def measure_kmh_to_mph(kmh: float) -> str:
+    """Convert a speed from kilometers per hour to miles per hour.
+
+    Args:
+        kmh: Speed in kilometers per hour.
+    """
+    return _num(kmh * 0.621371)
+
+
+@tool
+def measure_bytes_to_megabytes(byte_count: float) -> str:
+    """Convert a size from bytes to decimal megabytes (1 MB = 1,000,000 bytes).
+
+    Args:
+        byte_count: Size in bytes.
+    """
+    return _num(byte_count / 1_000_000)
+
+
+@tool
+def measure_megabytes_to_bytes(megabytes: float) -> str:
+    """Convert a size from decimal megabytes to bytes (1 MB = 1,000,000 bytes).
+
+    Args:
+        megabytes: Size in megabytes.
+    """
+    return _num(megabytes * 1_000_000)
+
+
+# ---------------------------------------------------------------------------
+# Category 10: encode_* (10) -- extends data_*
+# ---------------------------------------------------------------------------
+
+
+@tool
+def encode_hex_encode(text: str) -> str:
+    """Encode text as a hexadecimal string.
+
+    Args:
+        text: The text to encode.
+    """
+    return text.encode("utf-8").hex()
+
+
+@tool
+def encode_hex_decode(hex_string: str) -> str:
+    """Decode a hexadecimal string back to text.
+
+    Args:
+        hex_string: The hexadecimal string to decode.
+    """
+    try:
+        return bytes.fromhex(hex_string).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as exc:
+        return f"Could not decode hex: {exc}"
+
+
+@tool
+def encode_rot13(text: str) -> str:
+    """Apply the ROT13 substitution cipher to text.
+
+    Args:
+        text: The text to transform.
+    """
+    return codecs.encode(text, "rot_13")
+
+
+@tool
+def encode_caesar_cipher(text: str, shift: int) -> str:
+    """Encrypt text with a Caesar cipher, shifting letters by a fixed amount.
+
+    Args:
+        text: The text to encrypt.
+        shift: Number of positions to shift each letter (may be negative).
+    """
+    return _caesar_shift(text, shift)
+
+
+@tool
+def encode_caesar_decipher(text: str, shift: int) -> str:
+    """Decrypt text that was encrypted with :func:`encode_caesar_cipher` using the same shift.
+
+    Args:
+        text: The text to decrypt.
+        shift: The shift amount originally used to encrypt it.
+    """
+    return _caesar_shift(text, -shift)
+
+
+@tool
+def encode_md5_hash(text: str) -> str:
+    """Compute the MD5 checksum of text, as a hex digest.
+
+    Args:
+        text: The text to hash.
+    """
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+@tool
+def encode_sha256_hash(text: str) -> str:
+    """Compute the SHA-256 checksum of text, as a hex digest.
+
+    Args:
+        text: The text to hash.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@tool
+def encode_count_bytes(text: str) -> str:
+    """Count the number of UTF-8 encoded bytes in text (may exceed the character count).
+
+    Args:
+        text: The text to measure.
+    """
+    return str(len(text.encode("utf-8")))
+
+
+@tool
+def encode_is_ascii(text: str) -> str:
+    """Check whether text contains only ASCII characters.
+
+    Args:
+        text: The text to check.
+    """
+    return "true" if text.isascii() else "false"
+
+
+@tool
+def encode_strip_html_tags(text: str) -> str:
+    """Remove HTML tags from text, leaving only the visible content.
+
+    Args:
+        text: The HTML text to strip.
+    """
+    return re.sub(r"<[^>]+>", "", text)
+
+
+# ---------------------------------------------------------------------------
 # Helpers + registry builder
 # ---------------------------------------------------------------------------
 
@@ -641,6 +1272,17 @@ def _parse_numbers(raw: str) -> List[float]:
         except ValueError:
             continue
     return values
+
+
+def _caesar_shift(text: str, shift: int) -> str:
+    out = []
+    for ch in text:
+        if ch.isalpha():
+            base = ord("A") if ch.isupper() else ord("a")
+            out.append(chr((ord(ch) - base + shift) % 26 + base))
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 # Declared in a fixed order so build_registry(n) takes a stable, reproducible
@@ -666,13 +1308,34 @@ ALL_TOOLS = [
     data_base64_encode, data_base64_decode, data_url_encode, data_url_decode,
     data_generate_uuid, data_random_number, data_json_validate,
     data_sort_list, data_dedupe_list, data_char_frequency,
+    # stat_* (10)
+    stat_median, stat_stdev, stat_variance, stat_sum, stat_product,
+    stat_range, stat_count, stat_mode, stat_percentile, stat_normalize,
+    # format_* (10)
+    format_snake_case, format_camel_case, format_kebab_case,
+    format_capitalize_first, format_remove_punctuation, format_truncate,
+    format_pad_left, format_pad_right, format_repeat, format_slugify,
+    # calendar_* (10)
+    calendar_month_name, calendar_days_in_month, calendar_is_weekend,
+    calendar_next_weekday, calendar_week_number, calendar_start_of_month,
+    calendar_end_of_month, calendar_age_in_years, calendar_subtract_days,
+    calendar_is_same_day,
+    # measure_* (10)
+    measure_miles_to_nautical_miles, measure_nautical_miles_to_miles,
+    measure_acres_to_hectares, measure_hectares_to_acres,
+    measure_sqft_to_sqm, measure_sqm_to_sqft, measure_mph_to_kmh,
+    measure_kmh_to_mph, measure_bytes_to_megabytes, measure_megabytes_to_bytes,
+    # encode_* (10)
+    encode_hex_encode, encode_hex_decode, encode_rot13, encode_caesar_cipher,
+    encode_caesar_decipher, encode_md5_hash, encode_sha256_hash,
+    encode_count_bytes, encode_is_ascii, encode_strip_html_tags,
 ]
 
-assert len(ALL_TOOLS) == 50, f"Expected 50 tools, got {len(ALL_TOOLS)}"
-assert len({t.name for t in ALL_TOOLS}) == 50, "Duplicate tool names in ALL_TOOLS"
+assert len(ALL_TOOLS) == 100, f"Expected 100 tools, got {len(ALL_TOOLS)}"
+assert len({t.name for t in ALL_TOOLS}) == 100, "Duplicate tool names in ALL_TOOLS"
 
 
-def build_registry(n: int = 50) -> ToolRegistry:
+def build_registry(n: int = 100) -> ToolRegistry:
     """Build a registry with the first ``n`` tools from :data:`ALL_TOOLS`.
 
     Used by the scaling experiment to grow the tool set while keeping the

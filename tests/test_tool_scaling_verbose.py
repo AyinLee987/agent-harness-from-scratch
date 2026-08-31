@@ -1,4 +1,4 @@
-"""Tests for the verbose-description variant of the 50-tool kit.
+"""Tests for the verbose-description variant of the 100-tool kit.
 
 Deterministic checks (always run): the verbose kit is a faithful wrapper --
 same names, same schemas, same run() behavior -- with meaningfully longer
@@ -36,7 +36,7 @@ HAS_LIVE_LLM = bool(
 
 def test_verbose_kit_has_same_names_as_concise_kit():
     assert {t.name for t in ALL_TOOLS_VERBOSE} == {t.name for t in ALL_TOOLS}
-    assert len(ALL_TOOLS_VERBOSE) == 50
+    assert len(ALL_TOOLS_VERBOSE) == 100
 
 
 def test_verbose_descriptions_are_substantially_longer():
