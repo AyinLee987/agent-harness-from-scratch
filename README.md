@@ -189,6 +189,36 @@ Scoring is layered:
 Numbers above are from the deterministic mock; with a real model they reflect
 that model's quality.
 
+### Tool-count scaling experiment
+
+A common question when a project's tool registry grows is: *how many tools
+before the model's tool-*selection* accuracy drops?* `examples/tool_scaling_kit.py`
+ships a 50-tool catalog (five categories of ten near-duplicate tools each —
+`math_*`, `text_*`, `date_*`, `convert_*`, `data_*` — the kind of overlap that
+actually confuses selection, not just raw count) plus a matching
+`examples/tool_scaling_tasks.json` (one task per tool).
+
+`examples/tool_scaling_test.py` runs a fixed probe set of prompts unchanged
+while padding the surrounding registry with pure distractor tools from 6 up
+to the full 50, and reports selection accuracy at each size:
+
+```bash
+python examples/tool_scaling_test.py                 # DeepSeek by default
+python examples/tool_scaling_test.py --provider bailian --sizes 6,15,25,35,50
+```
+
+Requires a real LLM (`DEEPSEEK_API_KEY` / `BAILIAN_API_KEY` / `OPENAI_API_KEY`)
+— MockLLM's tool choice is keyword-heuristic, not a model decision, so it can't
+exhibit this effect. `tests/test_tool_scaling.py` covers the kit itself
+(50 unique, well-formed tools; golden-value checks on representative tools)
+unconditionally, plus a live-LLM smoke test that's skipped without an API key.
+
+Sample result (DeepSeek-chat, 6 fixed probe tasks): accuracy held at **100%
+from 6 tools up to the full 50** for this kit/model — a useful data point
+against the common "~20 tools" folklore threshold, which appears to bite
+sooner mainly with smaller/weaker models, far larger tool counts (100s), or
+tools with even closer name/argument overlap than this kit's.
+
 ## Tool-output safety
 
 Tool results are untrusted input — a web page or API response can carry text like
