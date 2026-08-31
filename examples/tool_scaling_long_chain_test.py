@@ -1,16 +1,17 @@
 """Long tool-call chain accuracy test: does chain *length* itself matter?
 
-``tool_scaling_multi_test.py`` only ever tested 2-step chains (14/14 exact
-matches at 50 tools, 13/14 at 100 -- one task picked up an extra, harmless
-self-check call). This script asks the follow-up question directly: does
-accuracy degrade further as the *chain itself* gets longer, independent of
-registry size?
+``tool_scaling_multi_test.py`` originally tested only 2-step chains (14/14
+exact matches at 50 tools, 13/14 at 100 -- one task picked up an extra,
+harmless self-check call); its tasks were since extended to 5+ steps too,
+so both task files now probe the same "5+ step chain" regime. This script
+asks the length question directly: does accuracy degrade further as the
+*chain itself* gets longer, independent of registry size?
 
-Loads ``tool_scaling_long_chain_tasks.json`` -- 7 tasks with
-``expect_tool_sequence`` lengths of 3 (x3), 4 (x2), and 5 (x2) -- and runs
-them against the full tool registry from ``tool_scaling_kit.py`` (currently
-100 tools), scoring exact tool-sequence match and final-answer correctness,
-broken down by chain length.
+Loads ``tool_scaling_long_chain_tasks.json`` -- 7 tasks, every
+``expect_tool_sequence`` at least 5 steps long -- and runs them against the
+full tool registry from ``tool_scaling_kit.py`` (currently 100 tools),
+scoring exact tool-sequence match and final-answer correctness, broken down
+by chain length.
 
 Usage
 -----
@@ -151,7 +152,7 @@ def run(provider: str, max_steps: int, delay: float) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Long tool-call-chain accuracy test.")
     parser.add_argument("--provider", default="deepseek", choices=["deepseek", "bailian", "openai"])
-    parser.add_argument("--max-steps", type=int, default=12)
+    parser.add_argument("--max-steps", type=int, default=14)
     parser.add_argument("--delay", type=float, default=0.2)
     parser.add_argument("--dump", metavar="PATH")
     args = parser.parse_args()

@@ -1,86 +1,86 @@
 [
   {
     "id": "convert_then_round",
-    "prompt": "Convert 10 kilometers to miles, then round the result to 1 decimal place.",
-    "expect_tool_sequence": ["convert_km_to_miles", "math_round"],
-    "expect_substrings": ["6.2"]
+    "prompt": "Convert 10 kilometers to miles, round the result to 2 decimal places, convert that number of miles to nautical miles, round to 1 decimal place, then add 1.",
+    "expect_tool_sequence": ["convert_km_to_miles", "math_round", "measure_miles_to_nautical_miles", "math_round", "math_add"],
+    "expect_substrings": ["6.4"]
   },
   {
     "id": "lower_then_vowels",
-    "prompt": "Convert 'Hello World' to lowercase, then count how many vowels are in the result.",
-    "expect_tool_sequence": ["text_lowercase", "text_count_vowels"],
-    "expect_substrings": ["3"]
+    "prompt": "Convert 'Hello World' to lowercase, count the vowels in the result, add 10 to that count, multiply by 2, then round to the nearest whole number.",
+    "expect_tool_sequence": ["text_lowercase", "text_count_vowels", "math_add", "math_multiply", "math_round"],
+    "expect_substrings": ["26"]
   },
   {
     "id": "add_days_then_weekday",
-    "prompt": "Add 10 days to 2026-08-31, then tell me what day of the week the new date falls on.",
-    "expect_tool_sequence": ["date_add_days", "date_day_of_week"],
-    "expect_substrings": ["Thursday"]
+    "prompt": "Add 10 days to 2026-08-31, find what day of the week the new date falls on, convert that weekday name to uppercase, reverse it, then count how many characters it has.",
+    "expect_tool_sequence": ["date_add_days", "date_day_of_week", "text_uppercase", "text_reverse", "text_char_count"],
+    "expect_substrings": ["8"]
   },
   {
     "id": "celsius_roundtrip",
-    "prompt": "Convert 100 degrees Celsius to Fahrenheit, then convert that result back to Celsius.",
-    "expect_tool_sequence": ["convert_celsius_to_fahrenheit", "convert_fahrenheit_to_celsius"],
+    "prompt": "Convert 100 degrees Celsius to Fahrenheit, then back to Celsius, then to Fahrenheit again, then back to Celsius again, then round the final result to the nearest whole number.",
+    "expect_tool_sequence": ["convert_celsius_to_fahrenheit", "convert_fahrenheit_to_celsius", "convert_celsius_to_fahrenheit", "convert_fahrenheit_to_celsius", "math_round"],
     "expect_substrings": ["100"]
   },
   {
     "id": "add_twice",
-    "prompt": "What is 12 plus 8? Take that result and add 15 to it.",
-    "expect_tool_sequence": ["math_add", "math_add"],
-    "expect_substrings": ["35"]
+    "prompt": "What is 12 plus 8? Add 15 to that result. Multiply by 2. Round to the nearest whole number. Then divide by 7.",
+    "expect_tool_sequence": ["math_add", "math_add", "math_multiply", "math_round", "math_divide"],
+    "expect_substrings": ["10"]
   },
   {
     "id": "upper_then_reverse",
-    "prompt": "Convert 'agent' to uppercase, then reverse the result.",
-    "expect_tool_sequence": ["text_uppercase", "text_reverse"],
-    "expect_substrings": ["TNEGA"]
+    "prompt": "Convert 'agent' to uppercase, reverse it, count its characters, add 3 to that count, then round to the nearest whole number.",
+    "expect_tool_sequence": ["text_uppercase", "text_reverse", "text_char_count", "math_add", "math_round"],
+    "expect_substrings": ["8"]
   },
   {
     "id": "multiply_twice",
-    "prompt": "Multiply 3 by 4. Then multiply that result by 5.",
-    "expect_tool_sequence": ["math_multiply", "math_multiply"],
-    "expect_substrings": ["60"]
+    "prompt": "Multiply 3 by 4, then multiply that by 5, then add 10, then subtract 20, then round to the nearest whole number.",
+    "expect_tool_sequence": ["math_multiply", "math_multiply", "math_add", "math_subtract", "math_round"],
+    "expect_substrings": ["50"]
   },
   {
     "id": "base64_roundtrip",
-    "prompt": "Base64-encode the word 'agent', then decode your own result back to plain text.",
-    "expect_tool_sequence": ["data_base64_encode", "data_base64_decode"],
-    "expect_substrings": ["agent"]
+    "prompt": "Base64-encode the word 'chain'. Hex-encode that Base64 string. Hex-decode it back to the Base64 string. Base64-decode that back to the original word. Then reverse the result.",
+    "expect_tool_sequence": ["data_base64_encode", "encode_hex_encode", "encode_hex_decode", "data_base64_decode", "text_reverse"],
+    "expect_substrings": ["niahc"]
   },
   {
     "id": "add_days_then_days_between",
-    "prompt": "Take 2026-01-01 and add 100 days to it. Then tell me how many days are between that new date and 2026-12-31.",
-    "expect_tool_sequence": ["date_add_days", "date_days_between"],
-    "expect_substrings": ["264"]
+    "prompt": "Take 2026-01-01 and add 100 days. Tell me how many days are between that new date and 2026-12-31. Divide that number by 2. Round to 1 decimal place. Then add 8.",
+    "expect_tool_sequence": ["date_add_days", "date_days_between", "math_divide", "math_round", "math_add"],
+    "expect_substrings": ["140"]
   },
   {
     "id": "kg_to_lb_then_round",
-    "prompt": "Convert 7 kilograms to pounds, then round the result to the nearest whole number.",
-    "expect_tool_sequence": ["convert_kg_to_lbs", "math_round"],
-    "expect_substrings": ["15"]
+    "prompt": "Convert 7 kilograms to pounds, round to the nearest whole number, convert that back to kilograms, round to 1 decimal place, then multiply by 2.",
+    "expect_tool_sequence": ["convert_kg_to_lbs", "math_round", "convert_lbs_to_kg", "math_round", "math_multiply"],
+    "expect_substrings": ["13.6"]
   },
   {
     "id": "replace_then_wordcount",
-    "prompt": "In the sentence 'I love cats and cats love me', replace 'cats' with 'dogs', then count how many words are in the result.",
-    "expect_tool_sequence": ["text_replace", "text_word_count"],
-    "expect_substrings": ["7"]
+    "prompt": "In 'I love cats and cats love me', replace 'cats' with 'dogs', count the words in the result, multiply that count by 3, add 1, then round to the nearest whole number.",
+    "expect_tool_sequence": ["text_replace", "text_word_count", "math_multiply", "math_add", "math_round"],
+    "expect_substrings": ["22"]
   },
   {
     "id": "average_then_round",
-    "prompt": "Compute the average of 2, 3, 5, and 7, then round it to 1 decimal place.",
-    "expect_tool_sequence": ["math_average", "math_round"],
-    "expect_substrings": ["4.2"]
+    "prompt": "Compute the average of 2, 3, 5, and 7. Round to 1 decimal place. Convert that number from Celsius to Fahrenheit. Round to the nearest whole number. Then divide by 5.",
+    "expect_tool_sequence": ["math_average", "math_round", "convert_celsius_to_fahrenheit", "math_round", "math_divide"],
+    "expect_substrings": ["8"]
   },
   {
     "id": "dedupe_then_sort",
-    "prompt": "Remove duplicate entries from this list, keeping order: b,a,c,a,b -- then sort what's left alphabetically.",
-    "expect_tool_sequence": ["data_dedupe_list", "data_sort_list"],
-    "expect_substrings": ["a,b,c"]
+    "prompt": "Remove duplicates from 'b,a,c,a,b', keeping order. Sort what's left alphabetically ascending. Then sort that result alphabetically descending. Convert the result to uppercase. Then reverse it.",
+    "expect_tool_sequence": ["data_dedupe_list", "data_sort_list", "data_sort_list", "text_uppercase", "text_reverse"],
+    "expect_substrings": ["A,B,C"]
   },
   {
     "id": "add_days_twice",
-    "prompt": "Add 5 days to 2026-01-01. Then add another 20 days to that new date.",
-    "expect_tool_sequence": ["date_add_days", "date_add_days"],
-    "expect_substrings": ["2026-01-26"]
+    "prompt": "Add 5 days to 2026-01-01. Add another 20 days to that new date. Tell me what day of the week the final date falls on. Tell me whether that date is a weekend. Then tell me its ISO week number.",
+    "expect_tool_sequence": ["date_add_days", "date_add_days", "date_day_of_week", "calendar_is_weekend", "calendar_week_number"],
+    "expect_substrings": ["Monday"]
   }
 ]

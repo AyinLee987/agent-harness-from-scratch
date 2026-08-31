@@ -9,8 +9,8 @@ errors compound across steps, so this is a stricter probe of the same
 underlying question before reaching for "just add more tools" as the next
 lever.
 
-Loads ``tool_scaling_multi_tasks.json`` (14 tasks, each with an
-``expect_tool_sequence`` -- the ordered, duplicates-allowed list of tool
+Loads ``tool_scaling_multi_tasks.json`` (14 tasks, each a 5+ step chain, with
+an ``expect_tool_sequence`` -- the ordered, duplicates-allowed list of tool
 calls a correct trajectory must contain) and runs them against the full
 kit from ``tool_scaling_kit.py`` (all of ``ALL_TOOLS``, whatever size that
 currently is).
@@ -149,7 +149,7 @@ def run(provider: str, max_steps: int, delay: float) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Multi-tool-call (chained) accuracy test.")
     parser.add_argument("--provider", default="deepseek", choices=["deepseek", "bailian", "openai"])
-    parser.add_argument("--max-steps", type=int, default=8)
+    parser.add_argument("--max-steps", type=int, default=14)
     parser.add_argument("--delay", type=float, default=0.2, help="Seconds to sleep between API calls.")
     parser.add_argument("--dump", metavar="PATH", help="Write full results JSON to PATH.")
     args = parser.parse_args()

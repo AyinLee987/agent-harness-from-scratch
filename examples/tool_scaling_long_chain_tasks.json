@@ -1,33 +1,33 @@
 [
   {
     "id": "sum_div_round",
-    "prompt": "Take the numbers 3, 7, 2, 9, 4. Compute their sum, then divide that sum by 5, then round the result to 1 decimal place.",
-    "expect_tool_sequence": ["stat_sum", "math_divide", "math_round"],
-    "expect_substrings": ["5"]
+    "prompt": "Take the numbers 3, 7, 2, 9, 4. Compute their sum, then divide that sum by 5, then round the result to 1 decimal place, then multiply by 3, then add 2.",
+    "expect_tool_sequence": ["stat_sum", "math_divide", "math_round", "math_multiply", "math_add"],
+    "expect_substrings": ["17"]
   },
   {
     "id": "snake_reverse_vowels",
-    "prompt": "Convert 'Hello World' to snake_case, then reverse the result, then count how many vowels are in the reversed text.",
-    "expect_tool_sequence": ["format_snake_case", "text_reverse", "text_count_vowels"],
-    "expect_substrings": ["3"]
+    "prompt": "Convert 'Hello World' to snake_case, then reverse the result, then count how many vowels are in the reversed text, then multiply that count by 4, then round to the nearest whole number.",
+    "expect_tool_sequence": ["format_snake_case", "text_reverse", "text_count_vowels", "math_multiply", "math_round"],
+    "expect_substrings": ["12"]
   },
   {
     "id": "add_days_weekday_weekend",
-    "prompt": "Add 45 days to 2026-01-01, then tell me what day of the week the new date falls on, then tell me whether that date is a weekend.",
-    "expect_tool_sequence": ["date_add_days", "date_day_of_week", "calendar_is_weekend"],
-    "expect_substrings": ["Sunday", "true"]
+    "prompt": "Add 45 days to 2026-01-01, then tell me what day of the week the new date falls on, then tell me whether that date is a weekend, then convert that true/false result to uppercase, then reverse it.",
+    "expect_tool_sequence": ["date_add_days", "date_day_of_week", "calendar_is_weekend", "text_uppercase", "text_reverse"],
+    "expect_substrings": ["EURT"]
   },
   {
     "id": "km_mi_nm_round",
-    "prompt": "Convert 10 kilometers to miles, then round that to 2 decimal places, then convert that number of miles to nautical miles, then round the nautical-mile result to 1 decimal place.",
-    "expect_tool_sequence": ["convert_km_to_miles", "math_round", "measure_miles_to_nautical_miles", "math_round"],
-    "expect_substrings": ["5.4"]
+    "prompt": "Convert 10 kilometers to miles, then round that to 2 decimal places, then convert that number of miles to nautical miles, then round the nautical-mile result to 1 decimal place, then convert that back into miles.",
+    "expect_tool_sequence": ["convert_km_to_miles", "math_round", "measure_miles_to_nautical_miles", "math_round", "measure_nautical_miles_to_miles"],
+    "expect_substrings": ["6.21"]
   },
   {
     "id": "base64_hex_roundtrip",
-    "prompt": "Base64-encode the word 'chain'. Then hex-encode that Base64 string. Then hex-decode your result back to the Base64 string. Then Base64-decode that back to the original word.",
-    "expect_tool_sequence": ["data_base64_encode", "encode_hex_encode", "encode_hex_decode", "data_base64_decode"],
-    "expect_substrings": ["chain"]
+    "prompt": "Base64-encode the word 'chain'. Then hex-encode that Base64 string. Then hex-decode your result back to the Base64 string. Then Base64-decode that back to the original word. Then convert the final result to uppercase.",
+    "expect_tool_sequence": ["data_base64_encode", "encode_hex_encode", "encode_hex_decode", "data_base64_decode", "text_uppercase"],
+    "expect_substrings": ["CHAIN"]
   },
   {
     "id": "sum_div_round_temp_round",

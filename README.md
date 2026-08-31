@@ -221,18 +221,19 @@ tools with even closer name/argument overlap than this kit's.
 
 Single-tool selection is the easy case, though. `examples/tool_scaling_multi_test.py`
 raises the bar with **chained** tasks against the same 50-tool registry —
-`examples/tool_scaling_multi_tasks.json` has 14 tasks each requiring 2+ tool
-calls in a specific order (some reusing the *same* tool twice, e.g. "add 12
-and 8, then add 15 to that"), where one wrong pick anywhere in the chain
-fails the whole trajectory:
+`examples/tool_scaling_multi_tasks.json` has 14 tasks each requiring several
+tool calls in a specific order (some reusing the *same* tool twice, e.g.
+"add 12 and 8, then add 15 to that"), where one wrong pick anywhere in the
+chain fails the whole trajectory:
 
 ```bash
 python examples/tool_scaling_multi_test.py
 ```
 
-Sample result (DeepSeek-chat, 50-tool registry): **14/14 exact tool-sequence
-matches (100%)**, answers correct too — chaining didn't move the needle
-either, at least for this model at this tool count.
+*(Historical result, when this file's chains were 2 steps long: 14/14 exact
+tool-sequence matches (100%) at 50 tools. The tasks were later extended to
+5+ steps each — see "All chains extended to 5+ steps" below for the current
+result, which looks very different.)*
 
 Neither raised tool count nor chained calls surfaced degradation, so the
 last variable from the original framing — *description length*, independent
@@ -249,10 +250,11 @@ python examples/tool_scaling_verbose_test.py
 ```
 
 Sample result (DeepSeek-chat, 50 tools, 14,705 → 94,975 schema chars, 6.5x):
-single-tool probe accuracy **100% (6/6)**, chain accuracy **100% (14/14)** —
-unchanged from the concise baseline. Across all three axes tested at 50
-tools (tool count, chained calls, ~6.5x description bloat), this model/kit
-combination showed no measurable accuracy drop.
+single-tool probe accuracy **100% (6/6)**, chain accuracy **100% (14/14 at
+the time, on the since-extended-to-5-steps chain file)** — unchanged from
+the concise baseline. Across all three axes tested at 50 tools (tool count,
+chained calls, ~6.5x description bloat), this model/kit combination showed
+no measurable accuracy drop.
 
 ### Pushing tool count to 100
 
@@ -268,53 +270,49 @@ python examples/tool_scaling_multi_test.py
 ```
 
 Single-tool probe accuracy: still **100%** at every size up to 100. The
-multi-tool chain, though, cracked slightly: **13/14 (93%) exact tool-sequence
-matches** — one task (add 5 days, then add 20 more) had the model insert an
-unrequested *third* `date_add_days` call as a self-check ("Verified: 5 + 20 =
-25 days total, which also gives the same date") before answering. The final
-answer was still correct (**14/14, 100%** on final-answer accuracy), so this
-isn't a wrong-tool-selection failure — it's an efficiency/trajectory-cleanliness
-one: more tools in context correlated with the model reaching for an extra,
-redundant confirmation call. First measurable wobble across everything tested
-here, and it shows up in trajectory shape before it shows up in the answer.
+multi-tool chain (2 steps at the time), though, cracked slightly: **13/14
+(93%) exact tool-sequence matches** — one task (add 5 days, then add 20
+more) had the model insert an unrequested *third* `date_add_days` call as a
+self-check before answering. The final answer was still correct (14/14,
+100%), so this wasn't a wrong-tool-selection failure yet — it's the first
+hint that longer trajectories give the model room to deviate.
 
 ### Chain length, not just tool count
 
-Every chained task so far was 2 steps. `examples/tool_scaling_long_chain_tasks.json`
-adds 7 tasks with 3-5-step chains (e.g. sum → divide → round, or lowercase →
-snake_case → reverse → count → leap-year-check) to ask whether *chain length
-itself* — independent of registry size — is a lever:
+Every chained task at that point was only 2 steps. `examples/tool_scaling_long_chain_tasks.json`
+first added 7 tasks at 3-5-step chains to ask whether *chain length itself*
+— independent of registry size — is a lever, and got a first real (if
+narrow) signal: one 3-step task had the model answer a weekend question
+correctly from its own reasoning ("Yes, it's a weekend") without calling the
+required `calendar_is_weekend` tool — right answer, skipped step.
+
+### All chains extended to 5+ steps
+
+Both chain task files were then rewritten so *every* task is a 5+ step
+chain — no more short chains anywhere in this kit's test suite:
 
 ```bash
-python examples/tool_scaling_long_chain_test.py
+python examples/tool_scaling_multi_test.py       # 14 tasks, all 5 steps
+python examples/tool_scaling_long_chain_test.py  # 7 tasks, all 5 steps
 ```
 
-Sample result (DeepSeek-chat, 100-tool registry): **6/7 (86%) exact
-tool-sequence matches**, broken down as 2/3 at length 3, 2/2 at length 4,
-2/2 at length 5 — length alone didn't produce a clean downward trend, but
-this is where the run produced two genuinely different failure shapes worth
-telling apart:
-
-- **A real trajectory miss**: a 3-step task asked whether a date was a
-  weekend; the model answered "**Yes**, it is a weekend (Sunday)" — correct
-  — but never called the required `calendar_is_weekend` tool, reasoning it
-  out from the weekday name instead. Right answer, wrong (shorter)
-  trajectory — the kind of thing that matters if you need the tool call
-  itself as an audit trail, not just a correct final string.
-- **A grading artifact, not a model failure**: a 5-step task's exact
-  tool-sequence matched perfectly, but the automated final-answer check
-  still counted it as wrong — because it looked for the literal string
-  `"false"` and the model's prose said "**No**, 18 is not a leap year"
-  instead. Manually verified: the tool chain and the underlying fact were
-  both correct end to end. This is a limitation of substring-based grading
-  (used throughout this repo's eval harness, not something new to this
-  script) mistaking a paraphrase for an error, not a model or tool-selection
-  problem. Re-graded by hand, final-answer accuracy for this run is 7/7.
-
-Net: at 3-5 step chains and 100 tools, the one real miss was a *skipped*
-tool call the model judged unnecessary, not a *wrong* one — a different
-failure mode than the "picks the wrong name" story the tool-count framing
-usually predicts.
+This is where the effect finally shows up cleanly. **Both files landed at
+the same number independently: 57% exact-sequence match** (8/14 and 4/7),
+down from 93-100% at shorter chains — while **final-answer accuracy stayed
+100% in both runs.** The mechanism is consistent across every miss, in both
+files: the model quietly **skips a step it judges redundant**, most often a
+`math_round` call whose input is already at (or past) the target precision
+— e.g. asked to round `70` to 0 decimals, it just reports `70` without
+calling the tool — and in one case (the weekend task, again) it drops
+`calendar_is_weekend` entirely, inferring the answer instead of calling the
+required tool. Every skip left the final numeric/factual answer unchanged,
+because a skipped no-op round doesn't change the value — which is exactly
+why final-answer accuracy can stay perfect while trajectory-exactness
+collapses. This is the clearest, most reproducible signal in the whole kit
+so far: not "picks the wrong tool," but "silently shortens a long,
+instruction-following-heavy trajectory once it's confident it already has
+the answer" — and it appears to kick in specifically once chains reach
+~5 steps, not at 2-4.
 
 ### Trying the scaling kit live (web UI / API)
 
