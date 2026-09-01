@@ -162,6 +162,17 @@ The Fetch server can access local and internal addresses. Only connect trusted
 MCP servers, restrict deployment network access where appropriate, and keep
 ToolOutputGuard enabled because fetched pages are untrusted model input.
 
+**`mcp-server-fetch` respects `robots.txt` by default**, and most major sites
+(LinkedIn, Facebook, Reddit, Twitter/X, ...) explicitly disallow automated
+fetching in theirs — verified live, fetching any of those fails with an
+explicit "robots.txt ... specifies that autonomous fetching ... is not
+allowed" error. In practice this is most of why a research Worker's fetch
+calls fail so often — it isn't a bug, it's the tool honoring the site's
+stated access policy. `MCP_FETCH_IGNORE_ROBOTS_TXT=1` makes it fetch anyway
+(passes `--ignore-robots-txt`); this is a deliberate choice to bypass that
+policy, not a fix, and is off by default — only turn it on if you've made
+that call for your deployment.
+
 ## Evaluation
 
 Run `python examples/run_eval.py` to score the agent over the sample tasks
@@ -667,6 +678,28 @@ Leader. Delegation is not a separate mode: `spawn_subagent` and the other
 lifecycle operations are simply part of the Leader's tool list. The model uses
 them only when the task benefits from Worker specialization or parallelism.
 The built-in server registers `researcher` and `analyst` Worker roles.
+
+**Visibility into what a Worker actually did.** `get_subagent_status` and
+`wait_subagents` used to return only a Worker's final answer and a bare step
+count — no way to tell it chained multiple tool calls, or that some of them
+failed. `SubagentResult.to_dict()` now always includes a compact
+`tool_calls: [{tool, ok}, ...]` summary (cheap — no full observation text, so
+it costs the Leader's own context nothing) alongside the existing fields. The
+SSE `done` event goes further and includes the full `trajectory` per Worker
+(`include_trajectory=True` — free there, since it goes straight to the
+frontend and never back into any LLM prompt); the Playground renders it as a
+`🔧 tool ✓ · tool ✗ · ...` line on each Worker's card.
+
+**A run that exhausts its step budget without answering** (`stop_reason:
+"max_steps"`) now yields a visible `error` SSE event before `done`. It
+previously didn't — unlike a budget-exceeded or fatal-tool-error stop, both
+of which already surfaced one — so a run that legitimately ran to its full
+step budget looked identical, from the frontend, to a dropped connection: no
+error shown, no answer, trace just goes quiet. `LEADER_SYSTEM_PROMPT` also
+now tells the Leader not to redo a Worker's investigation itself once it
+reports back — the case this was found from was a Leader burning most of its
+own step budget re-running the same (largely robots.txt-blocked) fetches its
+Worker had already attempted.
 
 ## Policy-controlled memory
 
