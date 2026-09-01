@@ -94,7 +94,7 @@ configure_logging()
 logger = get_logger("server")
 
 # ---------------------------------------------------------------------------
-# Tools (same three as examples/basic_tools.py)
+# Tools
 # ---------------------------------------------------------------------------
 import ast as _ast
 import operator as _operator
@@ -122,15 +122,6 @@ def _safe_eval(node):
     raise ValueError("Unsupported expression")
 
 
-_SEARCH_KB = {
-    "capital of france": "Paris is the capital of France.",
-    "capital of japan": "Tokyo is the capital of Japan.",
-    "tallest mountain": "Mount Everest is the tallest mountain on Earth at 8,849 m.",
-    "speed of light": "The speed of light is approximately 299,792 km/s.",
-    "creator of python": "Python was created by Guido van Rossum.",
-}
-
-
 @tool
 def calculator(expression: str) -> str:
     """Evaluate a basic arithmetic expression and return the result.
@@ -148,26 +139,13 @@ def calculator(expression: str) -> str:
 
 
 @tool
-def web_search(query: str) -> str:
-    """Look up a fact from a small canned knowledge base.
-    Args:
-        query: The search query.
-    """
-    q = query.lower()
-    for key, value in _SEARCH_KB.items():
-        if key in q:
-            return value
-    return f"No results found for '{query}'."
-
-
-@tool
 def datetime_now() -> str:
     """Return the current UTC date and time in ISO-8601 format."""
     return _dt.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def build_registry() -> ToolRegistry:
-    registry = ToolRegistry([calculator, web_search])
+    registry = ToolRegistry([calculator])
     datetime_now.name = "datetime"
     registry.register(datetime_now)
     file_tools_enabled = os.getenv("ENABLE_LOCAL_FILE_TOOLS", "0").strip().lower() in {
@@ -345,7 +323,7 @@ def _build_leader_runtime(
     workers = AgentRegistry()
 
     def build_researcher() -> ReActAgent:
-        names = ["web_search"]
+        names = []
         if "fetch__fetch" in REGISTRY:
             names.append("fetch__fetch")
         worker_tools = _copy_tools(*names)
