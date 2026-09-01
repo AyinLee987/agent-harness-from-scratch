@@ -14,6 +14,7 @@ from agent import (
     MockLLM,
     MultiAgentOrchestrator,
     ReActAgent,
+    RecoverableToolError,
     RunBudget,
     TaskStatus,
     ToolCall,
@@ -274,4 +275,112 @@ def test_agent_honors_a_preexisting_cancellation_request():
     assert not result.success
     assert result.stop_reason == "cancelled"
     assert result.steps == 0
+
+
+def test_leader_can_see_a_compact_tool_call_summary_of_what_a_worker_did():
+    """The Leader (and by extension a UI rendering its wait_subagents
+    result) used to only ever see a Worker's final answer and a bare step
+    count -- no way to tell it chained multiple tool calls, or that some of
+    them failed. SubagentResult.tool_call_summary() fixes that without
+    paying the token cost of the full trajectory (see its docstring)."""
+
+    @tool
+    def flaky_lookup(query: str) -> str:
+        if query == "first":
+            raise RecoverableToolError("not found, try again")
+        return f"found: {query}"
+
+    class RetryingWorkerLLM(MockLLM):
+        def __init__(self) -> None:
+            super().__init__()
+            self.phase = 0
+
+        def chat(self, messages, tools=None):
+            if self.phase == 0:
+                self.phase = 1
+                return LLMResponse(
+                    tool_calls=[ToolCall(id="a", name="flaky_lookup", arguments={"query": "first"})],
+                    usage=Usage(1, 1),
+                )
+            if self.phase == 1:
+                self.phase = 2
+                return LLMResponse(
+                    tool_calls=[ToolCall(id="b", name="flaky_lookup", arguments={"query": "second"})],
+                    usage=Usage(1, 1),
+                )
+            return LLMResponse(content="worker done", usage=Usage(1, 1))
+
+    class WaitingLeaderLLM(MockLLM):
+        def __init__(self) -> None:
+            super().__init__()
+            self.phase = 0
+            self.waited_payload: list | None = None
+
+        def chat(self, messages, tools=None):
+            if self.phase == 0:
+                self.phase = 1
+                return LLMResponse(
+                    tool_calls=[ToolCall(
+                        id="spawn", name="spawn_subagent",
+                        arguments={"role": "worker", "task": "look things up"},
+                    )],
+                    usage=Usage(1, 1),
+                )
+            if self.phase == 1:
+                self.phase = 2
+                spawn_output = next(
+                    m["content"] for m in reversed(messages)
+                    if m["role"] == "tool" and m.get("name") == "spawn_subagent"
+                )
+                task_id = json.loads(spawn_output)["task_id"]
+                return LLMResponse(
+                    tool_calls=[ToolCall(
+                        id="wait", name="wait_subagents",
+                        arguments={"task_ids": [task_id], "timeout_seconds": 2.0},
+                    )],
+                    usage=Usage(1, 1),
+                )
+            waited = next(
+                m["content"] for m in reversed(messages)
+                if m["role"] == "tool" and m.get("name") == "wait_subagents"
+            )
+            self.waited_payload = json.loads(waited)
+            return LLMResponse(content="leader saw the summary", usage=Usage(1, 1))
+
+    registry = AgentRegistry()
+    registry.register(
+        AgentSpec("worker", "Looks things up, sometimes needs a retry."),
+        lambda: ReActAgent(llm=RetryingWorkerLLM(), tools=ToolRegistry([flaky_lookup])),
+    )
+    leader_llm = WaitingLeaderLLM()
+
+    with MultiAgentOrchestrator(registry) as orchestrator:
+        result = orchestrator.run_leader(_leader(orchestrator, leader_llm), "look it up")
+
+    assert result.success
+    # What the Leader model itself saw via wait_subagents:
+    assert leader_llm.waited_payload[0]["tool_calls"] == [
+        {"tool": "flaky_lookup", "ok": False},
+        {"tool": "flaky_lookup", "ok": True},
+    ]
+    assert "trajectory" not in leader_llm.waited_payload[0]  # stays compact by default
+
+    # The same data is available for a UI via the full result object, which
+    # can additionally ask for the full trajectory (app/server.py does, for
+    # the SSE "done" event -- see include_trajectory in SubagentResult.to_dict).
+    subagent = result.subagents[0]
+    assert subagent.tool_call_summary() == [
+        {"tool": "flaky_lookup", "ok": False},
+        {"tool": "flaky_lookup", "ok": True},
+    ]
+    full = subagent.to_dict(include_trajectory=True)
+    # 3 steps: the two tool calls, plus the final answer step (no action).
+    assert len(full["trajectory"]) == 3
+    # step.error stays None for a recoverable failure -- only a
+    # FatalToolError sets it. The failure is embedded in the observation
+    # text instead, which is exactly what tool_call_summary() reads.
+    assert full["trajectory"][0]["error"] is None
+    assert full["trajectory"][0]["observation"].startswith("ERROR")
+    assert full["trajectory"][1]["error"] is None
+    assert not full["trajectory"][1]["observation"].startswith("ERROR")
 

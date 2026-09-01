@@ -109,10 +109,43 @@ class SubagentResult:
             "error_type": self.error_type,
             "steps": self.steps,
             "tokens": self.tokens,
+            "tool_calls": self.tool_call_summary(),
         }
         if include_trajectory:
             data["trajectory"] = list(self.trajectory)
         return data
+
+    def tool_call_summary(self) -> List[Dict[str, Any]]:
+        """One {tool, ok} entry per step that made a tool call.
+
+        Cheap enough to always include -- unlike the full trajectory, whose
+        observations can be large (a single fetch result can run to
+        thousands of characters) -- so a Leader deciding what to do next,
+        and a UI rendering a Worker's card, can both at least tell *that* a
+        Worker chained multiple tool calls (e.g. several fetches, some
+        failing) without paying for every call's full output text. Set
+        ``include_trajectory=True`` on :meth:`to_dict` for the full detail.
+
+        ``step["error"]`` is *not* the right signal here -- ToolDispatcher
+        (agent/trigger/dispatch.py) only ever sets it for a FatalToolError,
+        which already aborts the run. A RecoverableToolError, an unknown
+        tool, or malformed arguments all come back as a normal observation
+        string the model is meant to read and react to -- dispatch.py's own
+        convention for all of those is to prefix the text with "ERROR", so
+        that's what "ok" checks here too. One real limitation: a tool whose
+        genuinely successful output happens to start with the literal word
+        "ERROR" would be misclassified -- none of this kit's tools do, but a
+        custom tool could.
+        """
+        summary: List[Dict[str, Any]] = []
+        for step in self.trajectory:
+            action = step.get("action")
+            if not action:
+                continue
+            observation = step.get("observation") or ""
+            ok = step.get("error") is None and not observation.startswith("ERROR")
+            summary.append({"tool": action.get("name"), "ok": ok})
+        return summary
 
 
 @dataclass(frozen=True)

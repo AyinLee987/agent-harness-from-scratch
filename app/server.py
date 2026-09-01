@@ -275,6 +275,24 @@ def _enabled(name: str) -> bool:
     return os.getenv(name, "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _fetch_server_args(base_args: List[str]) -> List[str]:
+    """Append ``--ignore-robots-txt`` when explicitly opted in.
+
+    mcp-server-fetch respects robots.txt by default, which most major
+    sites (LinkedIn, Facebook, Reddit, Twitter/X, ...) use to explicitly
+    disallow automated fetching -- verified live: fetching any of those
+    fails with an explicit "robots.txt ... specifies that autonomous
+    fetching ... is not allowed" error, which is most of why a research
+    Worker's fetch calls fail so often in practice. This flag makes the
+    tool ignore robots.txt and fetch anyway. It is a deliberate opt-in past
+    sites' stated access policy, not a bug fix -- off by default; see
+    .env.example and the README for the tradeoff before turning it on.
+    """
+    if _enabled("MCP_FETCH_IGNORE_ROBOTS_TXT"):
+        return [*base_args, "--ignore-robots-txt"]
+    return list(base_args)
+
+
 def _start_rag():
     """Build the governed RAG runtime and ingest configured text sources."""
     global RAG_REPOSITORY, RAG_PIPELINE, RAG_INGESTION
@@ -380,7 +398,12 @@ LEADER_SYSTEM_PROMPT = (
     "spawn_subagent with the researcher or analyst role. Start independent "
     "subtasks before calling wait_subagents so they can run in parallel. Read "
     "the Worker results, recover from child failures when possible, and return "
-    "one coherent final answer. Do not delegate simple tasks unnecessarily."
+    "one coherent final answer. Do not delegate simple tasks unnecessarily. "
+    "Once a Worker reports back (even a partial or failed result), use what "
+    "it already found — do not redo the same investigation yourself with your "
+    "own tools; that wastes your own step budget on work already attempted. "
+    "If the Worker's result is genuinely insufficient, say so plainly in your "
+    "final answer rather than silently retrying the same approach."
 )
 
 
@@ -513,6 +536,7 @@ async def lifespan(_app: FastAPI):
                     ) from exc
                 raise
             command, args = uv_tool_command("mcp-server-fetch")
+            args = _fetch_server_args(args)
             fetch = MCPServerConfig.stdio(
                 name="fetch", command=command, args=args,
                 env={"PYTHONIOENCODING": "utf-8"},
@@ -943,8 +967,15 @@ async def stream(
                     session_provider.record_assistant_message, final_answer
                 )
 
+            # include_trajectory=True here (unlike the Leader-facing
+            # wait_subagents/get_subagent_status tools, which stay compact
+            # to avoid bloating the model's own context): this goes
+            # straight to the frontend as SSE data, never back into any
+            # LLM prompt, so there's no token cost to giving the UI the
+            # full per-step detail -- see SubagentResult.tool_call_summary.
             subagents = [
-                item.to_dict() for item in orchestrator.results_for_run(root_run_id)
+                item.to_dict(include_trajectory=True)
+                for item in orchestrator.results_for_run(root_run_id)
             ]
             yield _sse("done", {
                 "steps": len(ctx.steps),
@@ -1087,6 +1118,19 @@ async def _stream_leader_steps(*, task, agent, llm, registry, dispatcher, ctx):
             }
         if fatal_error is not None:
             break
+    else:
+        # The for loop ran out of iterations without ever `break`-ing (no
+        # "finished"/budget/fatal_tool_error case fired) -- stop_reason is
+        # still its initial "max_steps" default. Unlike those other stop
+        # paths, this one never yielded an "error" event, so the frontend
+        # trace just went quiet with no visible outcome at all -- a run
+        # that genuinely ran to its full step budget could look exactly
+        # like a dropped connection. See README's Structured logging /
+        # multi-agent notes for the case this was found from.
+        yield "error", {
+            "message": f"Stopped after {agent.max_steps} steps without a final answer "
+            "(max_steps reached).",
+        }
 
     yield "__stop__", {"stop_reason": stop_reason}
 

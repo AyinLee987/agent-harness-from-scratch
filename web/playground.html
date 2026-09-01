@@ -110,6 +110,9 @@
   .node-title { font-weight: 700; }
   .node-meta { color: var(--text-dim); font: 11px 'Cascadia Code', 'Fira Code', monospace; }
   .node-answer { white-space: pre-wrap; word-break: break-word; }
+  .node-tool-calls { font: 11px 'Cascadia Code', 'Fira Code', monospace; color: var(--text-dim); }
+  .node-tool-calls .tc-ok { color: #2e7d32; }
+  .node-tool-calls .tc-fail { color: #e53935; }
   .state-pill { margin-left: auto; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
   .state-pill.succeeded { background: var(--result-bg); color: #2e7d32; }
   .state-pill.failed, .state-pill.fatal_tool_error, .state-pill.timed_out { background: var(--error-bg); color: #e53935; }
@@ -493,8 +496,22 @@ function upsertSubagent(worker) {
       <span class="state-pill ${stateClass(state)}">${h(state)}</span>
     </div>
     ${data.instruction ? `<div class="node-meta">任务：${h(data.instruction)}</div>` : ''}
+    ${renderToolCalls(data.tool_calls)}
     ${data.answer ? `<div class="node-answer">${h(data.answer)}</div>` : ''}
     ${data.error_type ? `<div class="node-meta">error: ${h(data.error_type)}</div>` : ''}`;
+}
+
+// Compact per-step summary of the Worker's own tool calls (e.g. multiple
+// fetch__fetch attempts, some failing) -- without this, the card only ever
+// showed a bare step count, with no way to tell what actually happened
+// inside the delegated run. Backed by SubagentResult.tool_call_summary()
+// on the server; see agent/multi_agent/models.py.
+function renderToolCalls(toolCalls) {
+  if (!Array.isArray(toolCalls) || !toolCalls.length) return '';
+  const items = toolCalls
+    .map(tc => `<span class="${tc.ok ? 'tc-ok' : 'tc-fail'}">${tc.ok ? '✓' : '✗'} ${h(tc.tool || '?')}</span>`)
+    .join(' · ');
+  return `<div class="node-tool-calls">🔧 ${items}</div>`;
 }
 
 function stateClass(state) {
