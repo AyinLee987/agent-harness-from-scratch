@@ -8,7 +8,7 @@ from .models import (
     Chunk, Citation, Document, DocumentStatus, Evidence, EvidenceBundle, EvidenceConflict,
     EvidenceStatus, IngestionResult, MedicalQuery, RetrievalFilters, RetrievalHit,
 )
-from .pipeline import RAGConfig, RAGPipeline, format_evidence_context
+from .pipeline import CitationCounter, RAGConfig, RAGPipeline, format_evidence_context
 from .query import MedicalQueryPlanner
 from .repository import InMemoryRAGRepository, RAGRepository, SQLiteRAGRepository, content_checksum
 from .rerank import CallableReranker, HeuristicReranker, Reranker
@@ -16,6 +16,7 @@ from .retrieval import BM25Retriever, DenseRetriever, Retriever, reciprocal_rank
 
 __all__ = [
     "BM25Retriever", "CallableReranker", "Chunk", "ChunkValidation", "Citation",
+    "CitationCounter",
     "DenseRetriever", "Document", "DocumentIndexer", "DocumentStatus", "Evidence",
     "EvidenceBundle", "EvidenceConflict", "EvidenceStatus", "HeuristicReranker",
     "InMemoryRAGRepository", "IngestionResult", "LLMQueryDecomposer",

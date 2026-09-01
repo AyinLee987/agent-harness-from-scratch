@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(_HERE))  # repo root -> `import agent`
 
 from agent import (  # noqa: E402
     BM25Retriever,
+    CitationCounter,
     DenseRetriever,
     InMemoryRAGRepository,
     MedicalParentChildChunker,
@@ -131,11 +132,14 @@ def build_pipeline(
 
 def build_agent(llm_factory: Callable[[], BaseLLM], pipeline: RAGPipeline, *, max_steps: int = 8) -> ReActAgent:
     """A Leader-shaped agent: mandatory RAG injection + the follow-up
-    medical_evidence_search tool, same wiring app/server.py uses."""
-    tools = ToolRegistry([create_rag_search_tool(pipeline)])
+    medical_evidence_search tool, same wiring app/server.py uses -- including
+    one CitationCounter shared between them so a run with a follow-up search
+    doesn't collide [E#] labels between the two (see CitationCounter)."""
+    citation_counter = CitationCounter()
+    tools = ToolRegistry([create_rag_search_tool(pipeline, citation_counter=citation_counter)])
     return ReActAgent(
         llm=llm_factory(),
         tools=tools,
-        context_providers=[RAGContextProvider(pipeline)],
+        context_providers=[RAGContextProvider(pipeline, citation_counter=citation_counter)],
         max_steps=max_steps,
     )

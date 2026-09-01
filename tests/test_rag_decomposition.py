@@ -17,14 +17,18 @@ import pytest
 from agent import LLMResponse, MockLLM, Usage
 from agent.rag import (
     BM25Retriever,
+    CitationCounter,
     DenseRetriever,
     EvidenceStatus,
     InMemoryRAGRepository,
     LLMQueryDecomposer,
     MedicalParentChildChunker,
     RAGConfig,
+    RAGContextProvider,
     RAGIngestionService,
     RAGPipeline,
+    create_rag_search_tool,
+    format_evidence_context,
 )
 from agent.rag.decomposition import QueryDecomposition, _parse
 from agent.rag.models import EvidenceBundle, MedicalQuery
@@ -234,8 +238,6 @@ def test_sequential_verdict_runs_normal_retrieval_and_attaches_a_hint():
 
 
 def test_format_evidence_context_renders_decomposition_fields():
-    from agent.rag import format_evidence_context
-
     repository, bm25, dense, ingestion = _runtime()
     ingestion.ingest_text(logical_id="htn", title="一线用药", content=HYPERTENSION_TEXT)
     decomposer = LLMQueryDecomposer(_ScriptedDecomposerLLM({
@@ -258,3 +260,75 @@ def test_decomposer_exception_during_retrieve_falls_back_to_single_hop():
     bundle = pipeline.retrieve("妊娠患者能用示例药物 A 吗？")
     assert bundle.query.mode == "single_hop"
     assert bundle.status == EvidenceStatus.SUFFICIENT
+
+
+# ---------------------------------------------------------------------------
+# CitationCounter -- fixes [E#] colliding across multiple retrieval passes
+# in one run (the mandatory RAGContextProvider injection, plus any number
+# of medical_evidence_search follow-up calls independently restarting at
+# [E1] otherwise -- found running examples/rag_multihop_eval.py).
+# ---------------------------------------------------------------------------
+
+
+def test_format_evidence_context_with_no_counter_still_restarts_at_e1():
+    """Default (no shared counter) behavior is unchanged: each call is its
+    own private numbering, starting at [E1] -- this is what every existing
+    caller of format_evidence_context() gets for free, no code changes."""
+    repository, bm25, dense, ingestion = _runtime()
+    ingestion.ingest_text(logical_id="preg", title="妊娠指南", content=PREGNANCY_TEXT)
+    pipeline = RAGPipeline(repository, bm25, dense, config=RAGConfig(minimum_evidence=1))
+
+    first = format_evidence_context(pipeline.retrieve("妊娠患者能用示例药物 A 吗？"))
+    second = format_evidence_context(pipeline.retrieve("妊娠患者能用示例药物 A 吗？"))
+    assert "[E1]" in first
+    assert "[E1]" in second  # restarted, not "[E2]" -- no counter was shared
+
+
+def test_citation_counter_shared_across_calls_numbers_continuously():
+    repository, bm25, dense, ingestion = _runtime()
+    ingestion.ingest_text(logical_id="preg", title="妊娠指南", content=PREGNANCY_TEXT)
+    ingestion.ingest_text(logical_id="dose", title="剂量指南", content=DOSE_TEXT)
+    pipeline = RAGPipeline(repository, bm25, dense, config=RAGConfig(minimum_evidence=1))
+    counter = CitationCounter()
+
+    first = format_evidence_context(pipeline.retrieve("妊娠患者能用示例药物 A 吗？"), counter)
+    second = format_evidence_context(pipeline.retrieve("成人推荐剂量是多少？"), counter)
+
+    assert "[E1]" in first
+    # The second call's citations must not reuse any index the first call
+    # already used -- no [E1] in the second block, it continues where the
+    # first left off.
+    assert "[E1]" not in second
+    assert any(f"[E{n}]" in second for n in (2, 3, 4))
+
+
+def test_citation_counter_take_with_zero_evidence_does_not_advance():
+    counter = CitationCounter()
+    assert counter.take(0) == 1
+    assert counter.take(0) == 1  # still 1 -- nothing was reserved
+    assert counter.take(2) == 1  # first real reservation still starts at 1
+    assert counter.take(1) == 3  # advanced past the two just reserved
+
+
+def test_context_provider_and_search_tool_share_citations_with_one_counter():
+    """The actual bug scenario: a mandatory injection followed by a
+    follow-up medical_evidence_search call, wired the way app/server.py
+    wires them -- same CitationCounter passed to both."""
+    repository, bm25, dense, ingestion = _runtime()
+    ingestion.ingest_text(logical_id="preg", title="妊娠指南", content=PREGNANCY_TEXT)
+    ingestion.ingest_text(logical_id="dose", title="剂量指南", content=DOSE_TEXT)
+    pipeline = RAGPipeline(repository, bm25, dense, config=RAGConfig(minimum_evidence=1))
+
+    counter = CitationCounter()
+    provider = RAGContextProvider(pipeline, citation_counter=counter)
+    tool = create_rag_search_tool(pipeline, citation_counter=counter)
+
+    [injected] = provider.prepare("妊娠患者能用示例药物 A 吗？")
+    injected_text = injected["content"]
+    assert "[E1]" in injected_text
+
+    follow_up_text = tool.run(query="成人推荐剂量是多少？")
+    # This is the collision the bug allowed: without a shared counter this
+    # would also contain "[E1]", labeling different evidence with the same
+    # tag a model can't tell apart.
+    assert "[E1]" not in follow_up_text

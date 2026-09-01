@@ -873,14 +873,22 @@ Digging into why, honestly, rather than declaring victory:
 - **Real cost, no measured benefit**: the decomposer is one extra LLM call
   per retrieval. In this eval that bought nothing.
 
-One genuine bug this surfaced, unrelated to decomposition: `[E#]` citation
-numbers restart from 1 on *every* `format_evidence_context()` call — the
-mandatory injection's `[E1]` and a later `medical_evidence_search` call's
-own `[E1]` are different pieces of evidence with the same label. A model
-citing across both passes (as the transcripts show it doing) can't be
-unambiguously checked against the right source. Worth fixing separately —
-e.g. a bundle-relative offset — before leaning on multi-pass retrieval in
-a real deployment.
+One genuine bug this surfaced, unrelated to decomposition — **now fixed**:
+`[E#]` citation numbers used to restart from 1 on *every*
+`format_evidence_context()` call, so the mandatory injection's `[E1]` and a
+later `medical_evidence_search` call's own `[E1]` were different pieces of
+evidence with the same label; a model citing across both passes (the
+transcripts showed it doing exactly that) couldn't be unambiguously checked
+against the right source. `CitationCounter` (`agent/rag/pipeline.py`) is a
+small shared, mutable counter — pass the same instance to a
+`RAGContextProvider` and the `medical_evidence_search` tool built alongside
+it (as `app/server.py` and `examples/rag_multihop_kit.py` both do) and their
+citations number continuously across the whole run instead of colliding.
+Verified against a real run: the mandatory injection now numbers `[E1]-[E4]`
+and the follow-up search continues at `[E5]-[E10]`, and the final answer
+cites across both (`[E1][E7]`, `[E5][E8]`) with no collisions. Omitting
+`citation_counter` keeps the old per-call-restarts-at-`[E1]` behavior, so
+every existing caller is unaffected.
 
 **Takeaway**: this decomposition mechanism is implemented, unit-tested
 (`tests/test_rag_decomposition.py`, fully offline with a scripted decomposer),

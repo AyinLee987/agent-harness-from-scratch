@@ -64,6 +64,7 @@ from agent import (
     MultiAgentOrchestrator,
     LocalToolConfig,
     BM25Retriever,
+    CitationCounter,
     DenseRetriever,
     LLMQueryDecomposer,
     MedicalParentChildChunker,
@@ -361,7 +362,14 @@ def _build_leader_runtime(
             names.append("fetch__fetch")
         worker_tools = _copy_tools(*names)
         if RAG_PIPELINE:
-            worker_tools.register(create_rag_search_tool(RAG_PIPELINE))
+            # Own counter, scoped to this worker instance: a researcher's
+            # medical_evidence_search calls stay inside its own private
+            # trajectory (only its final text report reaches the Leader),
+            # so they never share a message list -- and thus never share a
+            # citation-numbering space -- with the Leader's own citations.
+            worker_tools.register(create_rag_search_tool(
+                RAG_PIPELINE, citation_counter=CitationCounter(),
+            ))
         return ReActAgent(
             llm=_build_llm(),
             tools=worker_tools,
@@ -403,12 +411,20 @@ def _build_leader_runtime(
     leader_registry = ToolRegistry(
         [REGISTRY.get(name) for name in REGISTRY.names() if REGISTRY.get(name)]
     )
+    # One counter shared between the Leader's mandatory RAG injection and
+    # its medical_evidence_search tool, scoped to this one run -- see
+    # CitationCounter's docstring for the [E1]/[E1] collision this avoids.
+    leader_citation_counter = CitationCounter()
     if RAG_PIPELINE:
-        leader_registry.register(create_rag_search_tool(RAG_PIPELINE))
+        leader_registry.register(create_rag_search_tool(
+            RAG_PIPELINE, citation_counter=leader_citation_counter,
+        ))
     leader_registry.register_many(orchestrator.leader_tools())
     context_providers: List[ContextProvider] = []
     if RAG_PIPELINE:
-        context_providers.append(RAGContextProvider(RAG_PIPELINE))
+        context_providers.append(RAGContextProvider(
+            RAG_PIPELINE, citation_counter=leader_citation_counter,
+        ))
     context_providers.extend(extra_context_providers or [])
     leader = ReActAgent(
         llm=_build_llm(),

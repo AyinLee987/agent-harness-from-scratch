@@ -95,7 +95,7 @@ from .observability import (
     sanitize,
 )
 from .rag import (
-    BM25Retriever, CallableReranker, Chunk, Citation, DenseRetriever, Document,
+    BM25Retriever, CallableReranker, Chunk, Citation, CitationCounter, DenseRetriever, Document,
     DocumentStatus, Evidence, EvidenceBundle, EvidenceConflict, EvidenceStatus,
     HeuristicReranker, InMemoryRAGRepository, LLMQueryDecomposer, MedicalParentChildChunker,
     MedicalQueryPlanner, QueryDecomposer, QueryDecomposition, RAGConfig, RAGContextProvider,
@@ -199,7 +199,7 @@ __all__ = [
     "DenseRetriever", "HeuristicReranker", "CallableReranker", "RAGConfig",
     "RAGPipeline", "RAGContextProvider", "create_rag_search_tool",
     "format_evidence_context", "QueryDecomposer", "QueryDecomposition",
-    "LLMQueryDecomposer",
+    "LLMQueryDecomposer", "CitationCounter",
     # Observability
     "configure_logging",
     "bind_log_context",
