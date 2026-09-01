@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, Optional
+from urllib.parse import urlparse
 
 from ..errors import FatalToolError, RecoverableToolError, ToolCallError
 from ..observability import get_logger, log_event
@@ -18,6 +19,39 @@ from ..tools import ToolRegistry
 logger = get_logger(__name__)
 
 
+def is_failure_observation(observation: Optional[str]) -> bool:
+    """Whether a tool observation string encodes a failure.
+
+    Every non-fatal failure path in :meth:`ToolDispatcher.dispatch` --
+    unknown tool, malformed/invalid arguments, ``RecoverableToolError`` --
+    returns a plain observation string prefixed with the literal ``"ERROR"``
+    rather than raising (only a ``FatalToolError`` sets ``step.error`` and
+    aborts the run). This is the one place that convention is spelled out;
+    :meth:`~agent.multi_agent.models.SubagentResult.tool_call_summary` and
+    the ReAct loop's forced-reflection trigger both call this instead of
+    repeating the ``str.startswith("ERROR")`` check inline.
+    """
+    return (observation or "").startswith("ERROR")
+
+
+def _source_streak_key(name: str, arguments: dict[str, Any]) -> Optional[str]:
+    """Per-(tool, host) key for tracking consecutive failures, or ``None``.
+
+    Only tools called with a ``url`` argument (fetch-like tools) are
+    tracked, bucketed by host rather than the full URL: a model retrying a
+    blocked site with a different path/query each time never repeats the
+    exact same ``(tool, arguments)`` pair, so :func:`_detect_loop`'s own
+    documented blind spot ("a loop that varies its arguments each time")
+    never fires for it -- this is the narrower, cheaper signal that catches
+    that specific case without touching loop detection's semantics.
+    """
+    url = arguments.get("url") if isinstance(arguments, dict) else None
+    if not isinstance(url, str) or not url:
+        return None
+    host = urlparse(url).netloc.lower() or url
+    return f"source_failure_streak::{name}::{host}"
+
+
 class ToolDispatcher:
     """Execute a single tool call with retry logic and error handling.
 
@@ -25,11 +59,21 @@ class ToolDispatcher:
         registry: The :class:`~agent.ToolRegistry` holding available tools.
         max_retries: Maximum retry attempts for malformed / unknown-tool errors
             (default 1 = try once, then fail).
+        source_failure_hint_threshold: Consecutive ``RecoverableToolError``\\ s
+            against the same host (see :func:`_source_streak_key`) before a
+            hint is appended to the observation telling the model to try a
+            different source. ``0`` disables the hint entirely.
     """
 
-    def __init__(self, registry: ToolRegistry, max_retries: int = 1) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        max_retries: int = 1,
+        source_failure_hint_threshold: int = 2,
+    ) -> None:
         self.registry = registry
         self.max_retries = max_retries
+        self.source_failure_hint_threshold = source_failure_hint_threshold
 
     def dispatch(
         self, ctx: ExecutionContext, name: str, arguments: dict[str, Any]
@@ -96,12 +140,22 @@ class ToolDispatcher:
             )
 
         # Dispatch.
+        streak_key = _source_streak_key(name, arguments)
         try:
-            return finish(self.registry.dispatch(name, arguments), "success")
+            result = self.registry.dispatch(name, arguments)
         except RecoverableToolError as exc:
-            return finish(
-                f"ERROR calling '{name}': {exc}", "recoverable_error", logging.WARNING
-            )
+            message = f"ERROR calling '{name}': {exc}"
+            if streak_key is not None:
+                streak = ctx.state.get(streak_key, 0) + 1
+                ctx.state[streak_key] = streak
+                if streak >= self.source_failure_hint_threshold > 0:
+                    message += (
+                        f" (This source has failed {streak} times in a row -- it "
+                        "may be blocking automated requests, rate-limiting, or "
+                        "otherwise unreachable. Try a different source instead of "
+                        "retrying this one.)"
+                    )
+            return finish(message, "recoverable_error", logging.WARNING)
         except FatalToolError:
             log_event(
                 logger,
@@ -152,3 +206,7 @@ class ToolDispatcher:
             raise FatalToolError(
                 f"Tool '{name}' failed unexpectedly: {exc}"
             ) from exc
+        else:
+            if streak_key is not None:
+                ctx.state[streak_key] = 0
+            return finish(result, "success")

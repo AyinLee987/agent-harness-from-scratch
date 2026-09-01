@@ -153,7 +153,15 @@ def test_recoverable_tool_error_is_returned_to_model():
                     tool_calls=[ToolCall(id="r", name="recoverable", arguments={})],
                     usage=Usage(1, 1),
                 )
-            assert "choose a different input" in messages[-1]["content"]
+            if tools is None:
+                # Forced reflection turn after the failure (see
+                # REFLECT_AFTER_FAILURE_STATE_KEY) -- no tools offered, so
+                # this call can only respond in plain text.
+                assert any(
+                    "choose a different input" in str(m.get("content", ""))
+                    for m in messages
+                )
+                return LLMResponse(content="that failed; I'll try differently.", usage=Usage(1, 1))
             return LLMResponse(content="I handled the tool failure.", usage=Usage(1, 1))
 
     agent = ReActAgent(llm=RecoveryLLM(), tools=ToolRegistry([recoverable]))
@@ -162,6 +170,161 @@ def test_recoverable_tool_error_is_returned_to_model():
     assert result.success
     assert result.stop_reason == "finished"
     assert "handled" in result.answer
+
+
+def test_a_failed_tool_call_forces_a_tool_less_reflection_turn_before_the_next_action():
+    """A model going straight from a failed observation into another tool
+    call, with nothing pausing it to reconsider, used to be how a retry
+    spiral happened -- loop detection only catches an *identical* repeated
+    (tool, arguments) pair, not one that varies its arguments each attempt.
+    Every failed tool call now forces the *next* think call to run with no
+    tool schemas offered (REFLECT_AFTER_FAILURE_STATE_KEY in
+    agent/trigger/react_loop.py), applying to both a Leader and any Worker
+    it spawns since both are ReActAgent/ReActLoop underneath."""
+
+    from agent import FORCED_REFLECTION_PROMPT
+    from agent.llm import LLMResponse, ToolCall, Usage
+
+    @tool
+    def flaky() -> str:
+        raise RecoverableToolError("temporarily unavailable")
+
+    class ProbeLLM(MockLLM):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tools_offered_per_call: list[bool] = []
+            self.reflection_call_messages: list[dict] | None = None
+
+        def chat(self, messages, tools=None):
+            self.tools_offered_per_call.append(tools is not None)
+            if tools is None:
+                self.reflection_call_messages = list(messages)
+                return LLMResponse(content="reflecting on the failure", usage=Usage(1, 1))
+            if len(self.tools_offered_per_call) == 1:
+                return LLMResponse(
+                    tool_calls=[ToolCall(id="f", name="flaky", arguments={})],
+                    usage=Usage(1, 1),
+                )
+            return LLMResponse(content="giving up after reflecting", usage=Usage(1, 1))
+
+    llm = ProbeLLM()
+    result = ReActAgent(llm=llm, tools=ToolRegistry([flaky])).run("try the flaky tool")
+
+    # Call order: [tools offered] -> fails -> [no tools, forced] -> [tools offered] -> answers.
+    assert llm.tools_offered_per_call == [True, False, True]
+    assert result.success
+    assert result.stop_reason == "finished"
+    assert result.answer == "giving up after reflecting"
+
+    # The reflection prompt that solicited the tool-less turn is really in
+    # the transcript that turn saw.
+    assert llm.reflection_call_messages is not None
+    assert any(
+        m.get("role") == "user" and m.get("content") == FORCED_REFLECTION_PROMPT
+        for m in llm.reflection_call_messages
+    )
+
+    reflection_steps = [s for s in result.trajectory if s["observation"] == "reflection"]
+    assert len(reflection_steps) == 1
+    assert reflection_steps[0]["action"] is None
+    assert reflection_steps[0]["thought"] == "reflecting on the failure"
+    assert reflection_steps[0]["error"] is None
+
+
+def test_repeated_failures_against_the_same_host_get_a_switch_source_hint():
+    """A model retrying a blocked site with a different URL each time never
+    repeats the identical (tool, arguments) pair loop detection watches for
+    -- this is the narrower per-host signal that catches that case (see
+    agent/trigger/dispatch.py's _source_streak_key docstring)."""
+
+    from agent.llm import LLMResponse, ToolCall, Usage
+
+    @tool
+    def fetch_like(url: str) -> str:
+        raise RecoverableToolError("403 Forbidden")
+
+    class HammeringLLM(MockLLM):
+        def __init__(self) -> None:
+            super().__init__()
+            self.real_calls = 0
+
+        def chat(self, messages, tools=None):
+            if tools is None:
+                # Forced reflection turn after a failure (see
+                # REFLECT_AFTER_FAILURE_STATE_KEY) -- doesn't count as one
+                # of the model's real tool-calling decisions below.
+                return LLMResponse(content="that failed, trying another page", usage=Usage(1, 1))
+            self.real_calls += 1
+            if self.real_calls <= 3:
+                # A different path each time -- never the identical call.
+                return LLMResponse(
+                    tool_calls=[ToolCall(
+                        id=str(self.real_calls), name="fetch_like",
+                        arguments={"url": f"https://blocked.example/page{self.real_calls}"},
+                    )],
+                    usage=Usage(1, 1),
+                )
+            return LLMResponse(content="giving up on that host", usage=Usage(1, 1))
+
+    agent = ReActAgent(llm=HammeringLLM(), tools=ToolRegistry([fetch_like]))
+    result = agent.run("look something up")
+
+    assert result.success
+    assert result.stop_reason == "finished"  # loop detection never fired
+    observations = [step["observation"] for step in result.trajectory if step.get("action")]
+    assert len(observations) == 3
+    # First failure: no hint yet (threshold is 2).
+    assert "Try a different source" not in observations[0]
+    # Second and third consecutive failures against the same host: hinted.
+    assert "Try a different source" in observations[1]
+    assert "Try a different source" in observations[2]
+
+
+def test_source_failure_streak_resets_on_success_and_is_per_host():
+    from agent.llm import LLMResponse, ToolCall, Usage
+
+    class FlakyThenOkLLM(MockLLM):
+        def __init__(self) -> None:
+            super().__init__()
+            self.real_calls = 0
+
+        def chat(self, messages, tools=None):
+            if tools is None:
+                # Forced reflection turn after the first failure.
+                return LLMResponse(content="trying a different host", usage=Usage(1, 1))
+            self.real_calls += 1
+            if self.real_calls == 1:
+                return LLMResponse(
+                    tool_calls=[ToolCall(
+                        id="a", name="fetch_like",
+                        arguments={"url": "https://blocked.example/a"},
+                    )],
+                    usage=Usage(1, 1),
+                )
+            if self.real_calls == 2:
+                # Different host -- must not inherit blocked.example's streak.
+                return LLMResponse(
+                    tool_calls=[ToolCall(
+                        id="b", name="fetch_like",
+                        arguments={"url": "https://ok.example/b"},
+                    )],
+                    usage=Usage(1, 1),
+                )
+            return LLMResponse(content="done", usage=Usage(1, 1))
+
+    @tool
+    def fetch_like(url: str) -> str:
+        if "blocked.example" in url:
+            raise RecoverableToolError("403 Forbidden")
+        return "page content"
+
+    agent = ReActAgent(llm=FlakyThenOkLLM(), tools=ToolRegistry([fetch_like]))
+    result = agent.run("look something up")
+
+    assert result.success
+    observations = [step["observation"] for step in result.trajectory if step.get("action")]
+    assert "Try a different source" not in observations[0]  # first failure, below threshold
+    assert observations[1] == "page content"  # different host, unaffected by the streak
 
 
 def test_fatal_tool_error_aborts_run_without_model_follow_up():

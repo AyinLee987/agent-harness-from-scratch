@@ -9,15 +9,22 @@ Components:
 
 from .gateway import AgentGateway, ConcurrencyGuard, RateLimiter, RequestQueue
 from .graph import StateGraph
-from .react_loop import ReActLoop
-from .dispatch import ToolDispatcher
+from .react_loop import (
+    FORCED_REFLECTION_PROMPT,
+    REFLECT_AFTER_FAILURE_STATE_KEY,
+    ReActLoop,
+)
+from .dispatch import ToolDispatcher, is_failure_observation
 
 __all__ = [
     "AgentGateway",
     "ConcurrencyGuard",
+    "FORCED_REFLECTION_PROMPT",
     "RateLimiter",
     "ReActLoop",
+    "REFLECT_AFTER_FAILURE_STATE_KEY",
     "RequestQueue",
     "StateGraph",
     "ToolDispatcher",
+    "is_failure_observation",
 ]

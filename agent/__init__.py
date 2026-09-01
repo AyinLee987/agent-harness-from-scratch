@@ -99,7 +99,7 @@ from .observability import (
 from .rag import (
     BM25Retriever, CallableReranker, Chunk, Citation, CitationCounter, DenseRetriever, Document,
     DocumentStatus, Evidence, EvidenceBundle, EvidenceConflict, EvidenceStatus,
-    HeuristicReranker, InMemoryRAGRepository, LLMQueryDecomposer, MedicalParentChildChunker,
+    HeuristicReranker, InMemoryRAGRepository, LLMQueryDecomposer, LLMReranker, MedicalParentChildChunker,
     MedicalQueryPlanner, QueryDecomposer, QueryDecomposition, RAGConfig, RAGContextProvider,
     RAGIngestionService, RAGPipeline, RetrievalFilters, SQLiteRAGRepository,
     create_rag_search_tool, format_evidence_context,
@@ -121,11 +121,14 @@ from .tools import BaseTool, FunctionTool, ToolRegistry, tool
 from .trigger import (
     AgentGateway,
     ConcurrencyGuard,
+    FORCED_REFLECTION_PROMPT,
     RateLimiter,
     ReActLoop,
+    REFLECT_AFTER_FAILURE_STATE_KEY,
     RequestQueue,
     StateGraph,
     ToolDispatcher,
+    is_failure_observation,
 )
 from .trigger.gateway import (
     ConcurrencyLimitExceeded,
@@ -146,6 +149,9 @@ __all__ = [
     "StateGraph",
     "ReActLoop",
     "ToolDispatcher",
+    "is_failure_observation",
+    "FORCED_REFLECTION_PROMPT",
+    "REFLECT_AFTER_FAILURE_STATE_KEY",
     "AgentGateway",
     "ConcurrencyGuard",
     "RateLimiter",
@@ -203,7 +209,7 @@ __all__ = [
     "DenseRetriever", "HeuristicReranker", "CallableReranker", "RAGConfig",
     "RAGPipeline", "RAGContextProvider", "create_rag_search_tool",
     "format_evidence_context", "QueryDecomposer", "QueryDecomposition",
-    "LLMQueryDecomposer", "CitationCounter",
+    "LLMQueryDecomposer", "LLMReranker", "CitationCounter",
     # Observability
     "configure_logging",
     "bind_log_context",

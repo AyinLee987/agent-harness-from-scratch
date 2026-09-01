@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from ..trigger.dispatch import is_failure_observation
+
 
 class TaskStatus(str, Enum):
     """Lifecycle states for one delegated task."""
@@ -142,8 +144,7 @@ class SubagentResult:
             action = step.get("action")
             if not action:
                 continue
-            observation = step.get("observation") or ""
-            ok = step.get("error") is None and not observation.startswith("ERROR")
+            ok = step.get("error") is None and not is_failure_observation(step.get("observation"))
             summary.append({"tool": action.get("name"), "ok": ok})
         return summary
 

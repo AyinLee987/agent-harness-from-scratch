@@ -28,7 +28,7 @@ from ..safety import ToolOutputGuard
 from ..state.context import ExecutionContext, Step
 from ..state.memory import LongTermMemory, ShortTermMemory
 from ..tools import ToolRegistry
-from .dispatch import ToolDispatcher
+from .dispatch import ToolDispatcher, is_failure_observation
 from .graph import StateGraph
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -37,6 +37,26 @@ DEFAULT_SYSTEM_PROMPT = (
     "and the user asks about something you might have stored from past conversations "
     "or domain knowledge, call it proactively. When you have enough information, "
     "respond with a final answer and do not call any more tools."
+)
+
+# Set on ctx.state after a step where at least one tool call failed (see
+# is_failure_observation). The *next* think call is forced to run with no
+# tool schemas offered, so the model must respond in plain text instead of
+# immediately firing off another tool call -- a soft "try a different
+# source" hint appended to the observation text turned out not to be enough
+# on its own (a model mid-retry-spiral kept issuing tool calls straight
+# through it); withholding tools for one turn makes reflection mandatory
+# rather than hoped-for. See FORCED_REFLECTION_PROMPT and its use in
+# _act_node / _think_node below, and app/server.py's _stream_leader_steps
+# for the SSE-streaming duplicate of this same mechanism.
+REFLECT_AFTER_FAILURE_STATE_KEY = "__reflect_after_failure__"
+
+FORCED_REFLECTION_PROMPT = (
+    "Your last tool call failed. Before doing anything else, briefly explain "
+    "(1) why you think it failed and (2) what you will try differently -- a "
+    "different source or approach, or stopping here and reporting what you "
+    "already have. Do not call a tool in this reply; you will get to act "
+    "again right after."
 )
 
 logger = get_logger(__name__)
@@ -77,6 +97,7 @@ class ReActLoop:
         max_tool_retries: int = 1,
         loop_detection: bool = True,
         loop_same_call_limit: int = 3,
+        source_failure_hint_threshold: int = 2,
         agent_name: str = "agent",
         memory_manager: Optional[MemoryManager] = None,
         memory_namespace: str = "default",
@@ -101,7 +122,11 @@ class ReActLoop:
         self.memory_namespace = memory_namespace
         self.memory_subject_id = memory_subject_id
         self.context_providers = list(context_providers or [])
-        self._dispatcher = ToolDispatcher(tools, max_retries=max_tool_retries)
+        self._dispatcher = ToolDispatcher(
+            tools,
+            max_retries=max_tool_retries,
+            source_failure_hint_threshold=source_failure_hint_threshold,
+        )
         self._graph = self._build_graph()
 
     # -- graph construction -------------------------------------------------
@@ -111,8 +136,14 @@ class ReActLoop:
         ::
 
             [think] ──(tool_calls)──▶ [act] ──(fixed)──▶ [think]
-               │
+               │             │
+               │             └──(forced reflection)──▶ [think]
                └──(answer)──▶ __end__
+
+        The ``think`` → ``think`` self-edge is for a forced-reflection turn
+        (see REFLECT_AFTER_FAILURE_STATE_KEY): that branch of _think_node
+        never dispatches a tool and never finishes, it just needs to loop
+        straight back to a normal think call.
         """
         g = StateGraph()
         g.add_node("think", self._think_node)
@@ -121,7 +152,7 @@ class ReActLoop:
         g.add_conditional_edges(
             "think",
             _route_by_next,
-            {"tools": "act", "finish": "__end__"},
+            {"tools": "act", "finish": "__end__", "think": "think"},
         )
         g.add_conditional_edges(
             "act",
@@ -275,6 +306,8 @@ class ReActLoop:
                 state["__stop_reason__"] = f"loop_detected: {loop_reason}"
                 return state
 
+        reflect = ctx.state.pop(REFLECT_AFTER_FAILURE_STATE_KEY, False)
+
         step = ctx.new_step()
 
         managed = self.short_term.manage(ctx.messages)
@@ -293,10 +326,13 @@ class ReActLoop:
             "llm.call.started",
             step=step.index,
             message_count=len(managed),
-            tool_count=len(self.tools),
+            tool_count=0 if reflect else len(self.tools),
+            forced_reflection=reflect,
         )
         try:
-            response = self.llm.chat(managed, tools=self.tools.schemas())
+            response = self.llm.chat(
+                managed, tools=None if reflect else self.tools.schemas()
+            )
         except Exception:
             log_event(
                 logger,
@@ -320,6 +356,19 @@ class ReActLoop:
             elapsed_ms=round((time.perf_counter() - llm_started) * 1000, 2),
         )
         ctx.add_tokens(response.usage.total_tokens)
+
+        if reflect:
+            # No tools were offered, so this response can only be text --
+            # never a final answer and never a tool call, regardless of what
+            # response.wants_tool/content look like. Record it as a plain
+            # reasoning step and go straight back to a normal think step
+            # (tools available again) rather than finishing the run.
+            content = (response.content or "").strip() or "(no reasoning provided)"
+            step.thought = content
+            step.observation = "reflection"
+            ctx.add_message("assistant", content)
+            state["__next__"] = "think"
+            return state
 
         if response.wants_tool:
             step.thought = response.content or "(calling tool)"
@@ -395,6 +444,16 @@ class ReActLoop:
         }
         step.observation = "\n".join(observations)
 
+        if any(is_failure_observation(obs) for obs in observations):
+            # Force the *next* think call to run with no tools offered (see
+            # REFLECT_AFTER_FAILURE_STATE_KEY) instead of letting the model
+            # go straight from a failed call to another tool call.
+            ctx.add_message("user", FORCED_REFLECTION_PROMPT)
+            ctx.state[REFLECT_AFTER_FAILURE_STATE_KEY] = True
+            log_event(
+                logger, logging.INFO, "reflection.forced", tool_name=tool_calls[0].name
+            )
+
         state["__next__"] = "think"
         return state
 
@@ -414,7 +473,7 @@ class ReActLoop:
 
     def _force_finish(self, ctx: ExecutionContext) -> str:
         for step in reversed(ctx.steps):
-            if step.observation and step.observation != "final_answer":
+            if step.observation and step.observation not in ("final_answer", "reflection"):
                 return f"(stopped) Last observation: {step.observation}"
         return "(stopped) No answer was produced within the configured budget."
 

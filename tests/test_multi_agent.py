@@ -296,6 +296,10 @@ def test_leader_can_see_a_compact_tool_call_summary_of_what_a_worker_did():
             self.phase = 0
 
         def chat(self, messages, tools=None):
+            if tools is None:
+                # Forced reflection turn after "first" fails (see
+                # REFLECT_AFTER_FAILURE_STATE_KEY) -- doesn't advance phase.
+                return LLMResponse(content="that failed, retrying", usage=Usage(1, 1))
             if self.phase == 0:
                 self.phase = 1
                 return LLMResponse(
@@ -374,13 +378,18 @@ def test_leader_can_see_a_compact_tool_call_summary_of_what_a_worker_did():
         {"tool": "flaky_lookup", "ok": True},
     ]
     full = subagent.to_dict(include_trajectory=True)
-    # 3 steps: the two tool calls, plus the final answer step (no action).
-    assert len(full["trajectory"]) == 3
+    # 4 steps: the first tool call (fails), the forced reflection turn it
+    # triggers (see REFLECT_AFTER_FAILURE_STATE_KEY -- no action, so
+    # tool_call_summary() above correctly skips it), the second tool call
+    # (succeeds), plus the final answer step (no action).
+    assert len(full["trajectory"]) == 4
     # step.error stays None for a recoverable failure -- only a
     # FatalToolError sets it. The failure is embedded in the observation
     # text instead, which is exactly what tool_call_summary() reads.
     assert full["trajectory"][0]["error"] is None
     assert full["trajectory"][0]["observation"].startswith("ERROR")
-    assert full["trajectory"][1]["error"] is None
-    assert not full["trajectory"][1]["observation"].startswith("ERROR")
+    assert full["trajectory"][1]["action"] is None
+    assert full["trajectory"][1]["observation"] == "reflection"
+    assert full["trajectory"][2]["error"] is None
+    assert not full["trajectory"][2]["observation"].startswith("ERROR")
 

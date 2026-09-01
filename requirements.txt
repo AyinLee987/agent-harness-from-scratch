@@ -1,6 +1,9 @@
 # Core runtime dependency: NumPy powers the in-memory vector store.
 numpy>=1.24
 
+# Loads config/agent.yaml (app/config.py) -- the Leader/Worker run-tuning file.
+PyYAML>=6.0
+
 # Generic MCP client integration. MCP SDK v2 requires Python 3.10+.
 mcp>=2.0,<3
 

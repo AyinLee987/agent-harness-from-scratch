@@ -70,6 +70,7 @@ from agent import (
     CitationCounter,
     DenseRetriever,
     LLMQueryDecomposer,
+    LLMReranker,
     MedicalParentChildChunker,
     OpenAICompatibleEmbeddingProvider,
     InMemorySessionStore,
@@ -88,6 +89,9 @@ from agent import (
     ToolOutputGuard,
     ToolRegistry,
     ToolDispatcher,
+    FORCED_REFLECTION_PROMPT,
+    REFLECT_AFTER_FAILURE_STATE_KEY,
+    is_failure_observation,
     RequestLoggingMiddleware,
     bind_log_context,
     configure_logging,
@@ -95,9 +99,16 @@ from agent import (
     log_event,
     tool,
 )
+from app.config import load_agent_config
 
 configure_logging()
 logger = get_logger("server")
+
+# Leader/Worker run-tuning knobs (step/token budgets, delegation limits,
+# retry/loop-detection behavior, session windowing) -- see config/agent.yaml
+# and app/config.py. Loaded once at import time; edit the YAML and restart
+# to pick up changes. AGENT_CONFIG_PATH points at a different file.
+CONFIG = load_agent_config()
 
 # ---------------------------------------------------------------------------
 # Tools
@@ -333,13 +344,23 @@ def _start_rag():
     # retrieval, only worth it if your corpus actually has compound/
     # multi-hop questions to answer.
     decomposer = LLMQueryDecomposer(_build_llm()) if _enabled("ENABLE_RAG_QUERY_DECOMPOSITION") else None
+    # Opt-in: replace the default HeuristicReranker (lexical-overlap
+    # heuristic) with one that asks the chat model itself to score each
+    # candidate's relevance. Real cost: ~2.2s added per retrieval (one more
+    # LLM call) -- measured on BEIR NFCorpus (see the companion evaluation
+    # project's benchmarks/rag_recall_beir/RESULTS_llm_rerank.md) to beat
+    # both plain RRF fusion and HeuristicReranker on every metric,
+    # significantly on Recall@5/10 and nDCG@5/10 -- not on MRR. Off by
+    # default because of that latency, not because it measures worse.
+    reranker = LLMReranker(_build_llm()) if _enabled("ENABLE_LLM_RERANKER") else None
     RAG_REPOSITORY = repository
-    RAG_PIPELINE = RAGPipeline(repository, bm25, dense, decomposer=decomposer)
+    RAG_PIPELINE = RAGPipeline(repository, bm25, dense, reranker=reranker, decomposer=decomposer)
     RAG_INGESTION = ingestion
     log_event(
         logger, logging.INFO, "rag.started",
         document_count=len(repository.list_documents()),
         query_decomposition_enabled=decomposer is not None,
+        llm_reranker_enabled=reranker is not None,
     )
 
 
@@ -403,7 +424,10 @@ LEADER_SYSTEM_PROMPT = (
     "it already found — do not redo the same investigation yourself with your "
     "own tools; that wastes your own step budget on work already attempted. "
     "If the Worker's result is genuinely insufficient, say so plainly in your "
-    "final answer rather than silently retrying the same approach."
+    "final answer rather than silently retrying the same approach. When using "
+    "fetch yourself, some sites block automated requests -- if a source fails "
+    "twice in a row, stop retrying it and try a different one instead of "
+    "digging deeper into a source that isn't going to answer."
 )
 
 
@@ -413,10 +437,21 @@ def _copy_tools(*names: str) -> ToolRegistry:
 
 
 def _build_leader_runtime(
-    max_steps: int = 10,
+    max_steps: Optional[int] = None,
     extra_context_providers: Optional[Sequence[ContextProvider]] = None,
 ):
-    """Create a request-scoped Leader whose delegation ability is a tool set."""
+    """Create a request-scoped Leader whose delegation ability is a tool set.
+
+    ``max_steps=None`` (the default) lets the Leader and each Worker use
+    their own independent step budget from ``config/agent.yaml``
+    (``CONFIG.leader.max_steps`` / ``CONFIG.worker.max_steps``). Passing an
+    explicit value (e.g. a client's ``POST /api/run`` request) overrides
+    both with that one number, matching the pre-config behavior where a
+    single ``max_steps`` applied to the whole run.
+    """
+
+    leader_max_steps = CONFIG.leader.max_steps if max_steps is None else max_steps
+    worker_max_steps = CONFIG.worker.max_steps if max_steps is None else max_steps
 
     workers = AgentRegistry()
 
@@ -440,10 +475,19 @@ def _build_leader_runtime(
             system_prompt=(
                 "You are a research Worker. Investigate only the delegated task, "
                 "use available source tools when useful, and return a concise "
-                "evidence-focused report to the Leader."
+                "evidence-focused report to the Leader. Some sites block automated "
+                "fetching (robots.txt, anti-bot challenges, rate limits) -- if a "
+                "source fails twice in a row, stop retrying it and move to a "
+                "different source instead. For any one sub-question, two or three "
+                "sources are usually enough; report what you found (including gaps) "
+                "rather than exhaustively chasing every remaining lead."
             ),
             output_guard=OUTPUT_GUARD,
-            max_steps=max_steps,
+            max_steps=worker_max_steps,
+            max_tool_retries=CONFIG.react_loop.max_tool_retries,
+            loop_same_call_limit=CONFIG.react_loop.loop_same_call_limit,
+            source_failure_hint_threshold=CONFIG.react_loop.source_failure_hint_threshold,
+            compress_at_fraction=CONFIG.react_loop.compress_at_fraction,
             agent_name="researcher",
         )
 
@@ -456,7 +500,11 @@ def _build_leader_runtime(
                 "return a focused report, and do not delegate further."
             ),
             output_guard=OUTPUT_GUARD,
-            max_steps=max_steps,
+            max_steps=worker_max_steps,
+            max_tool_retries=CONFIG.react_loop.max_tool_retries,
+            loop_same_call_limit=CONFIG.react_loop.loop_same_call_limit,
+            source_failure_hint_threshold=CONFIG.react_loop.source_failure_hint_threshold,
+            compress_at_fraction=CONFIG.react_loop.compress_at_fraction,
             agent_name="analyst",
         )
 
@@ -470,7 +518,13 @@ def _build_leader_runtime(
     )
     orchestrator = MultiAgentOrchestrator(
         workers,
-        RunBudget(max_subagents=6, max_parallel_tasks=3),
+        RunBudget(
+            max_subagents=CONFIG.run_budget.max_subagents,
+            max_parallel_tasks=CONFIG.run_budget.max_parallel_tasks,
+            max_depth=CONFIG.run_budget.max_depth,
+            max_repeated_task=CONFIG.run_budget.max_repeated_task,
+            subagent_timeout_seconds=CONFIG.run_budget.subagent_timeout_seconds,
+        ),
     )
     leader_registry = ToolRegistry(
         [REGISTRY.get(name) for name in REGISTRY.names() if REGISTRY.get(name)]
@@ -499,7 +553,12 @@ def _build_leader_runtime(
         tools=leader_registry,
         system_prompt=LEADER_SYSTEM_PROMPT,
         output_guard=OUTPUT_GUARD,
-        max_steps=max_steps,
+        max_steps=leader_max_steps,
+        max_tokens=CONFIG.leader.max_tokens,
+        max_tool_retries=CONFIG.react_loop.max_tool_retries,
+        loop_same_call_limit=CONFIG.react_loop.loop_same_call_limit,
+        source_failure_hint_threshold=CONFIG.react_loop.source_failure_hint_threshold,
+        compress_at_fraction=CONFIG.react_loop.compress_at_fraction,
         agent_name="leader",
         context_providers=context_providers or None,
         memory_manager=MEMORY_MANAGER,
@@ -587,7 +646,11 @@ app.add_middleware(RequestLoggingMiddleware)
 # -- Pydantic models -------------------------------------------------------
 class RunRequest(BaseModel):
     task: str
-    max_steps: int = 10
+    # None (the default) lets the Leader and each Worker use their own
+    # independent step budget from config/agent.yaml -- see
+    # _build_leader_runtime. Passing a value overrides both with that one
+    # number, same as before this was configurable.
+    max_steps: Optional[int] = None
     conversation_id: Optional[str] = Field(
         default=None,
         description="Pass back the conversation_id from a prior response to "
@@ -786,7 +849,11 @@ async def run(req: RunRequest):
     session_provider: Optional[SessionContextProvider] = None
     if req.conversation_id:
         session_provider = SessionContextProvider(
-            SESSION_STORE, req.conversation_id, llm=_build_llm()
+            SESSION_STORE,
+            req.conversation_id,
+            llm=_build_llm(),
+            recent_window=CONFIG.session.recent_window,
+            summarize_beyond=CONFIG.session.summarize_beyond,
         )
         extra_providers.append(session_provider)
 
@@ -878,11 +945,14 @@ async def stream(
     session_provider: Optional[SessionContextProvider] = None
     if conversation_id:
         session_provider = SessionContextProvider(
-            SESSION_STORE, conversation_id, llm=_build_llm()
+            SESSION_STORE,
+            conversation_id,
+            llm=_build_llm(),
+            recent_window=CONFIG.session.recent_window,
+            summarize_beyond=CONFIG.session.summarize_beyond,
         )
 
     orchestrator, agent = _build_leader_runtime(
-        max_steps=10,
         extra_context_providers=[session_provider] if session_provider else None,
     )
     llm = agent.llm
@@ -898,7 +968,11 @@ async def stream(
                 if message.get("content"):
                     ctx.add_message(str(message.get("role", "system")), str(message["content"]))
         ctx.add_message("user", task)
-        dispatcher = ToolDispatcher(leader_registry)
+        dispatcher = ToolDispatcher(
+            leader_registry,
+            max_retries=CONFIG.react_loop.max_tool_retries,
+            source_failure_hint_threshold=CONFIG.react_loop.source_failure_hint_threshold,
+        )
         stop_reason = "max_steps"
         root_run_id = ""
         final_answer: Optional[str] = None
@@ -973,10 +1047,17 @@ async def stream(
             # straight to the frontend as SSE data, never back into any
             # LLM prompt, so there's no token cost to giving the UI the
             # full per-step detail -- see SubagentResult.tool_call_summary.
-            subagents = [
-                item.to_dict(include_trajectory=True)
-                for item in orchestrator.results_for_run(root_run_id)
-            ]
+            # result_payloads_for_run (not results_for_run) so each entry
+            # carries its final "status" -- a Worker the Leader never polled
+            # again after spawning it would otherwise report with no status,
+            # and the playground merges this onto the card it already drew
+            # from the spawn_subagent result, which *does* have a status
+            # ("pending") -- without one here to overwrite it, that card
+            # would look stuck on "pending" forever despite success/answer
+            # already reflecting the real outcome.
+            subagents = orchestrator.result_payloads_for_run(
+                root_run_id, include_trajectory=True
+            )
             yield _sse("done", {
                 "steps": len(ctx.steps),
                 "tokens": ctx.tokens_used + sum(item["tokens"] for item in subagents),
@@ -1010,6 +1091,15 @@ async def _stream_leader_steps(*, task, agent, llm, registry, dispatcher, ctx):
             yield "error", {"message": f"Budget exceeded: {ctx.budget_reason()}"}
             break
 
+        # A failed tool call in the previous step's ACT phase set this --
+        # force this THINK call to run with no tools offered so the model
+        # must respond in plain text instead of immediately firing off
+        # another tool call. Mirrors ReActLoop._think_node's
+        # REFLECT_AFTER_FAILURE_STATE_KEY handling; see that module's
+        # docstring for why a soft hint in the observation text wasn't
+        # enough on its own.
+        reflect = ctx.state.pop(REFLECT_AFTER_FAILURE_STATE_KEY, False)
+
         # --- THINK phase with streaming ---
         yield "think_start", {"step": step_idx}
         full_content = ""
@@ -1021,18 +1111,19 @@ async def _stream_leader_steps(*, task, agent, llm, registry, dispatcher, ctx):
             "llm.stream.started",
             step=step_idx,
             message_count=len(ctx.messages),
-            tool_count=len(registry),
+            tool_count=0 if reflect else len(registry),
+            forced_reflection=reflect,
         )
 
         try:
             async for event in llm.astream(
                 agent.short_term.manage(ctx.messages),
-                tools=registry.schemas(),
+                tools=None if reflect else registry.schemas(),
             ):
                 if event["type"] == "text":
                     full_content += event["data"]
                     yield "text", {"step": step_idx, "token": event["data"]}
-                elif event["type"] == "tool_call":
+                elif event["type"] == "tool_call" and not reflect:
                     tool_calls.append(event["data"])
                     yield "tool_call", {"step": step_idx, "tool": event["data"]}
         except Exception:
@@ -1057,6 +1148,15 @@ async def _stream_leader_steps(*, task, agent, llm, registry, dispatcher, ctx):
         )
 
         ctx.add_tokens(estimate_tokens_simple(full_content))
+
+        if reflect:
+            # No tools were offered, so this can only be a plain-text
+            # reasoning turn -- never a final answer. Record it and loop
+            # straight back to a normal (tool-enabled) think step.
+            reasoning = full_content.strip() or "(no reasoning provided)"
+            ctx.add_message("assistant", reasoning)
+            yield "reflection", {"step": step_idx, "text": reasoning}
+            continue
 
         # No tool calls → final answer.
         if not tool_calls:
@@ -1095,6 +1195,7 @@ async def _stream_leader_steps(*, task, agent, llm, registry, dispatcher, ctx):
         )
 
         fatal_error = None
+        any_failed = False
         for tc in tc_objects:
             try:
                 result = dispatcher.dispatch(ctx, tc.name, tc.arguments)
@@ -1110,6 +1211,8 @@ async def _stream_leader_steps(*, task, agent, llm, registry, dispatcher, ctx):
             scan = OUTPUT_GUARD.scan(result)
             if scan.suspicious:
                 result = scan.sanitized
+            if is_failure_observation(result):
+                any_failed = True
             ctx.add_message("tool", result, tool_call_id=tc.id, name=tc.name)
             yield "tool_result", {
                 "step": step_idx,
@@ -1118,6 +1221,14 @@ async def _stream_leader_steps(*, task, agent, llm, registry, dispatcher, ctx):
             }
         if fatal_error is not None:
             break
+        if any_failed:
+            # See REFLECT_AFTER_FAILURE_STATE_KEY above: forces the next
+            # THINK call to run tool-less.
+            ctx.add_message("user", FORCED_REFLECTION_PROMPT)
+            ctx.state[REFLECT_AFTER_FAILURE_STATE_KEY] = True
+            log_event(
+                logger, logging.INFO, "reflection.forced", tool_name=tc_objects[0].name
+            )
     else:
         # The for loop ran out of iterations without ever `break`-ing (no
         # "finished"/budget/fatal_tool_error case fired) -- stop_reason is

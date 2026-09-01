@@ -79,6 +79,8 @@
   .event { padding: 10px 14px; border-radius: 8px; font-size: 14px; animation: fadeIn 0.2s; word-break: break-word; }
   @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
   .event.think { background: var(--card-bg); border: 1px solid var(--border); }
+  .event.reflection { background: var(--card-bg); border: 1px solid #f0ad4e; }
+  .event.reflection .label { color: #f0ad4e; }
   .event.tool-call { background: var(--tool-bg); border-left: 3px solid var(--accent); }
   .event.tool-result { background: var(--result-bg); border-left: 3px solid #4caf50; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 13px; }
   .event.answer { background: var(--card-bg); border: 2px solid var(--accent); font-weight: 500; }
@@ -399,6 +401,19 @@ async function startStream(task) {
             case 'answer':
               streamingEl = null;
               addEvent('answer', `<span class="label">✅ 最终答案</span>${h(data.text)}`);
+              break;
+            case 'reflection':
+              // Tool call just failed -- the model was forced to respond
+              // with no tools offered, so its already-streamed "💭 思考中…"
+              // bubble for this step is that reasoning. Relabel it in place
+              // instead of duplicating the text into a new bubble.
+              if (streamingEl) {
+                const label = streamingEl.querySelector('.label');
+                if (label) { label.textContent = '🔄 失败后重新思考'; label.classList.remove('thinking'); }
+                streamingEl.classList.remove('think');
+                streamingEl.classList.add('reflection');
+              }
+              streamingEl = null;
               break;
             case 'error':
               addEvent('error', `<span class="label">❌ 错误</span>${h(data.message || '')}`);

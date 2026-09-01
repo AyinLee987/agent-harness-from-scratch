@@ -549,7 +549,7 @@ agent/
     ingestion.py      staged ingestion, dedup, versioned publication
     retrieval.py     BM25Retriever + DenseRetriever
     pipeline.py      RAGPipeline: fusion + rerank + parent-context hydration
-    rerank.py        HeuristicReranker / CallableReranker
+    rerank.py        HeuristicReranker / CallableReranker / LLMReranker
     query.py         MedicalQueryPlanner
     context.py       RAGContextProvider + create_rag_search_tool
     repository.py    in-memory + SQLite document/chunk storage
@@ -570,7 +570,10 @@ agent/
     tasks.json       sample eval tasks with expected outcomes
 app/                 ← entry points, run from the repo root
   server.py          FastAPI app: /api/run, /api/stream, /api/tools, /api/rag/documents
+  config.py          🆕 loads config/agent.yaml into server.CONFIG
   rag_ingest.py      CLI for local/batch RAG corpus ingestion (python -m app.rag_ingest)
+config/
+  agent.yaml         🆕 Leader/Worker run tuning — see "Run configuration" below
 examples/
   basic_tools.py         calculator + web-search-stub + datetime + memory_search tools
   context_compression.py query-aware context compression demo
@@ -596,6 +599,8 @@ tests/
   test_server_delegation.py        delegation as an ordinary Leader tool, via /api/*
   test_server_conversation.py      🆕 conversation_id continuity on /api/run
   test_session_context.py          🆕 SessionContextProvider replay + summarization
+  test_agent_config.py             🆕 config/agent.yaml loading (app/config.py)
+  test_server_agent_config.py      🆕 _build_leader_runtime reads server.CONFIG
 web/
   ReAct Agent Playground — interactive browser demo (Vite + React + TS)
 ```
@@ -642,6 +647,55 @@ def remote_lookup(key: str) -> str:
 Unclassified exceptions are fatal by default. This fail-closed behavior makes
 tool authors decide explicitly whether the model can repair a failure by
 changing its next action.
+
+## Run configuration (`config/agent.yaml`)
+
+The FastAPI server's step/token budgets, delegation limits, retry/loop-detection
+behavior, and session history windowing live in `config/agent.yaml`, loaded once
+at startup by `app/config.py` into `server.CONFIG`:
+
+```yaml
+leader:
+  max_steps: 100
+  max_tokens: 100000
+
+worker:
+  max_steps: 100
+
+run_budget:
+  max_subagents: 6
+  max_parallel_tasks: 3
+  max_depth: 1
+  max_repeated_task: 1
+  subagent_timeout_seconds: 120.0
+
+react_loop:
+  max_tool_retries: 1
+  loop_same_call_limit: 3
+  compress_at_fraction: 0.6
+  source_failure_hint_threshold: 2
+
+session:
+  recent_window: 12
+  summarize_beyond: 24
+```
+
+These used to be hardcoded literals scattered through `_build_leader_runtime`
+(`max_steps=10`, `RunBudget(max_subagents=6, max_parallel_tasks=3)`, ...). The
+file is entirely optional — the whole file, any section, or any individual key
+can be missing, and the value shown above (the shipped default, defined in
+`app/config.py`'s dataclasses) is used instead. Point at a different file with
+`AGENT_CONFIG_PATH`; nothing here is hot-reloaded, so restart the server after
+editing. Secrets and deployment feature-toggles (API keys, `ENABLE_*`, DB
+paths) stay in `.env` — this file is only for numbers that shape one run's
+behavior.
+
+`leader.max_steps` and `worker.max_steps` are independent — a Worker a Leader
+spawns via `spawn_subagent` usually needs far fewer steps than the Leader's own
+run. `POST /api/run`'s `max_steps` request field (now optional; omit it to use
+the configured defaults) still overrides *both* with one number, matching the
+pre-config behavior. `GET /api/stream` has no per-request override and always
+uses the configured defaults.
 
 ## Leader and Subagents
 
@@ -704,6 +758,46 @@ now tells the Leader not to redo a Worker's investigation itself once it
 reports back — the case this was found from was a Leader burning most of its
 own step budget re-running the same (largely robots.txt-blocked) fetches its
 Worker had already attempted.
+
+**Giving up on a blocked source instead of hammering it.** A Worker (or the
+Leader, fetching directly) retrying an anti-scrape-protected site tends to
+vary the URL each attempt — a different path, a different search result —
+so `loop_same_call_limit`'s identical-`(tool, arguments)` check never fires;
+one real run spent 9 minutes and ~120 `fetch` calls this way, most of them
+`recoverable_error`. `ToolDispatcher` now tracks consecutive failures
+per-host (`ctx.state`, reset on that host's next success) and, past
+`react_loop.source_failure_hint_threshold` (default 2), appends a hint to
+the observation itself — *"this source has failed N times in a row ...
+try a different source instead"* — the cheapest place to act on it, since
+the model already reads every observation. The researcher and Leader system
+prompts also now say explicitly to drop a source after two failures and to
+stop once two or three sources answer a sub-question, rather than
+exhaustively chasing every remaining lead.
+
+That hint alone turned out not to be enough — a live run kept issuing tool
+calls straight through it, 263 `fetch` calls over 15 minutes, ~150 of them
+consecutive near-identical failures against what was evidently the same
+host. A soft nudge in the observation text is easy for a model mid-retry to
+skim past; it was never actually forced to stop and read it. So every failed
+tool call (`is_failure_observation` — the same "ERROR"-prefixed convention
+`tool_call_summary` reads) now forces the *next* think call to run with no
+tool schemas offered at all — `ReActLoop._think_node` calls
+`self.llm.chat(managed, tools=None)` — so the model can only respond in
+plain text. That response is recorded as a `"reflection"` step
+(`action: null`) and the loop goes straight back to a normal, tool-enabled
+think call; it's never treated as a final answer even if the text sounds
+conclusive. This applies uniformly to the Leader and to every Worker it
+spawns, since both run on the same `ReActLoop` underneath — plus a matching
+copy in `app/server.py`'s `_stream_leader_steps`, the hand-rolled duplicate
+of the think/act cycle the Leader's own `GET /api/stream` path actually
+runs (SSE streaming needed its own version before this fix reached the
+Leader's live path at all; see the Playground's amber "🔄 失败后重新思考"
+bubble, relabeled in place from the same text that streamed in as the
+model's normal "💭 思考中…" bubble). This is a deliberately harder mechanism
+than the per-host hint above — withholding tools makes reflection
+mandatory rather than hoped-for, closer to how Codex's Guardian circuit
+breaker hard-interrupts after repeated denials instead of trusting the
+model to self-correct from prompt text.
 
 ## Policy-controlled memory
 
@@ -1002,6 +1096,47 @@ It would likely matter more with a weaker model, a corpus where parallel
 sub-facts *don't* share an obvious keyword (so single-shot retrieval
 genuinely can't find both), or if evidence-set precision (not just final-
 answer correctness) were the thing being optimized.
+
+### LLM-as-reranker: does asking the model itself beat the heuristic?
+
+The paragraph above already suggests replacing `HeuristicReranker`
+(lexical-overlap + a fixed authority weight) with "a validated
+cross-encoder in production." `LLMReranker` (`agent/rag/rerank.py`) is a
+second, model-driven option: one chat-completion call per retrieval,
+listwise-scoring every fused RRF candidate 0–10 for relevance, via the
+existing `CallableReranker` adapter (no pipeline changes needed to add it).
+
+```dotenv
+ENABLE_LLM_RERANKER=1
+```
+
+Off by default, and it's a real tradeoff, not a strict upgrade: measured on
+BEIR NFCorpus (323 real, published, relevance-judged queries — see the
+companion evaluation project's
+`benchmarks/rag_recall_beir/RESULTS_llm_rerank.md`) against plain RRF
+fusion and against `HeuristicReranker`, `LLMReranker` wins on **every**
+metric, clearing paired bootstrap significance (p<0.05, mostly p<0.001) on
+Recall@5/10 and nDCG@5/10 against both — not significantly on MRR, the
+noisiest metric on that benchmark throughout. The cost is latency: ~2.2s
+added per retrieval (one more real LLM call), 6–12x slower than the other
+rerankers, all of which are local computation over already-embedded
+vectors. Worth it for a lower-QPS deployment or a query class where the
+extra couple of seconds is affordable; not a hot-path default.
+
+**A real failure worth knowing about before writing a similar prompt**:
+the first version of this prompt was zero-shot (instructions + a one-line
+format example). Measured 41% degenerate-response rate scoring ~30
+candidates in one call on `deepseek-chat` — not malformed JSON, the model
+literally echoing the prompt's own format description back
+(`"[json array of 30 numbers]"`) instead of doing the task. Rewriting the
+prompt as one-shot (a complete worked example: a 5-passage query, fully
+scored) fixed it to 0/323 failures on the same benchmark. `LLMReranker`
+raises on an unparseable response rather than fabricating scores;
+`RAGPipeline._retrieve_single` already catches any reranker exception and
+falls back to plain RRF order for that one query (`degraded_components`),
+so a rare bad response degrades gracefully instead of corrupting a
+ranking — this was true before `LLMReranker` existed and needed no changes
+to support it.
 
 Corpus writes have separate management entry points. For local or batch import:
 

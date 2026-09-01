@@ -1,0 +1,67 @@
+# Agent run tuning — loaded once at server startup by app/config.py.
+#
+# This file is for "how big / how many / how long" numbers that shape how
+# the Leader and its Workers run. It is optional: any key, section, or the
+# whole file can be missing and the value shown below (the shipped default)
+# is used instead — see app/config.py's dataclass defaults, which are the
+# single source of truth this file mirrors.
+#
+# Secrets and deployment feature-toggles (API keys, ENABLE_*, DB paths) stay
+# in .env, not here — see .env.example.
+#
+# Point at a different file with AGENT_CONFIG_PATH; restart the server (or
+# any process that imports app.config) to pick up edits — nothing here is
+# hot-reloaded.
+
+leader:
+  # Hard cap on think/act iterations for one Leader run. A client request
+  # (POST /api/run's max_steps) can still override this per call.
+  max_steps: 100
+  # Hard cap on cumulative LLM tokens for one Leader run (guardrail against
+  # a runaway loop, not a cost/quota control).
+  max_tokens: 100000
+
+worker:
+  # Same idea as leader.max_steps, but for a Worker a Leader spawns via
+  # spawn_subagent. Kept separate from the Leader's budget since a focused
+  # sub-task usually needs far fewer steps than the Leader's own run.
+  max_steps: 100
+
+run_budget:
+  # Ceiling on how many Workers one Leader run may dispatch in total.
+  max_subagents: 6
+  # How many Workers may run at once (ThreadPoolExecutor size).
+  max_parallel_tasks: 3
+  # Delegation depth a Worker itself may spawn further Workers to (1 = a
+  # Worker cannot delegate further).
+  max_depth: 1
+  # How many times the same (role, instruction) pair may be dispatched
+  # again in one run before spawn_subagent refuses it.
+  max_repeated_task: 1
+  # Wall-clock seconds before an unfinished Worker is force-cancelled.
+  subagent_timeout_seconds: 120.0
+
+react_loop:
+  # Retries for a single malformed tool call before the step fails cleanly.
+  max_tool_retries: 1
+  # Repeats of the identical (tool, arguments) call the loop-detection guard
+  # tolerates before treating the run as stuck.
+  loop_same_call_limit: 3
+  # Trigger context compression once the transcript reaches this fraction
+  # of max_tokens.
+  compress_at_fraction: 0.6
+  # Consecutive tool failures against the same host (a fetch-like tool
+  # called with a `url` argument) before the observation gets an appended
+  # hint telling the model to try a different source. Catches a pattern
+  # loop_same_call_limit can't: a model retrying a blocked/anti-scrape site
+  # with a different path or query each time never repeats the identical
+  # (tool, arguments) pair loop detection watches for. 0 disables the hint.
+  source_failure_hint_threshold: 2
+
+session:
+  # Most recent stored messages replayed verbatim on every turn.
+  recent_window: 12
+  # Once a conversation holds more than this many stored messages, older
+  # ones are folded into a single persisted summary instead of being
+  # replayed in full (see agent/memory/context.py).
+  summarize_beyond: 24

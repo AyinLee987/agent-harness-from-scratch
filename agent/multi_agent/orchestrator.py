@@ -279,6 +279,34 @@ class MultiAgentOrchestrator:
                 return []
             return [self._normalized_result(self._tasks[item]) for item in root.task_ids]
 
+    def result_payloads_for_run(
+        self, root_run_id: str, *, include_trajectory: bool = False
+    ) -> List[Dict[str, object]]:
+        """Like :meth:`results_for_run`, but as JSON-ready dicts carrying each
+        task's current ``status`` -- for HTTP/UI responses.
+
+        ``SubagentResult`` (what :meth:`results_for_run` returns, and what a
+        Leader sees from ``wait_subagents``/``get_subagent_status``) has no
+        ``status`` field of its own; those two tools add it on top via
+        :meth:`_result_payload`. The final summary a UI renders after a run
+        (e.g. the ``/api/stream`` "done" event) needs the same treatment: a
+        Worker the Leader dispatched but never checked on again (no
+        ``wait_subagents``/``get_subagent_status`` call before finishing)
+        would otherwise be reported with no status at all, which a client
+        merging it onto its last-known "pending" card (from the
+        ``spawn_subagent`` result) renders as stuck pending forever, even
+        though the Worker actually succeeded, failed, or was cancelled when
+        the root closed.
+        """
+        with self._condition:
+            root = self._roots.get(root_run_id)
+            if root is None:
+                return []
+            return [
+                self._result_payload(self._tasks[item], include_trajectory=include_trajectory)
+                for item in root.task_ids
+            ]
+
     def close(self) -> None:
         """Cancel logical task handles and shut down Worker threads."""
 
@@ -500,7 +528,11 @@ class MultiAgentOrchestrator:
             error_type=reason,
         )
 
-    def _result_payload(self, record: _TaskRecord) -> Dict[str, object]:
-        data: Dict[str, object] = self._normalized_result(record).to_dict()
+    def _result_payload(
+        self, record: _TaskRecord, *, include_trajectory: bool = False
+    ) -> Dict[str, object]:
+        data: Dict[str, object] = self._normalized_result(record).to_dict(
+            include_trajectory=include_trajectory
+        )
         data["status"] = record.status.value
         return data
