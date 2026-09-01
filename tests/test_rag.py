@@ -218,6 +218,43 @@ def test_dense_retriever_accepts_a_swapped_in_vector_store(tmp_path: Path):
     assert bundle.evidence
 
 
+try:
+    import chromadb  # noqa: F401
+    HAS_CHROMADB = True
+except ImportError:
+    HAS_CHROMADB = False
+
+
+@pytest.mark.skipif(not HAS_CHROMADB, reason="chromadb not installed")
+def test_dense_retriever_works_end_to_end_with_a_real_chroma_collection(tmp_path: Path):
+    from agent.state import ChromaVectorStore
+
+    repository, bm25, _default_dense, _ingestion = _runtime()
+    chroma_store = ChromaVectorStore(persist_directory=str(tmp_path / "chroma"))
+    embeddings = LLMEmbeddingProvider(MockLLM(), model_id="test:hash")
+    dense = DenseRetriever(repository, embeddings, vector_store=chroma_store)
+    ingestion = RAGIngestionService(
+        repository, MedicalParentChildChunker(target_tokens=80, min_tokens=20, max_tokens=120),
+        [bm25, dense],
+    )
+    ingestion.ingest_text(
+        logical_id="guide/hypertension", title="高血压指南", content=TEXT,
+        publisher="权威学会", document_type="guideline", jurisdiction="CN",
+    )
+    assert len(chroma_store) > 0
+
+    pipeline = RAGPipeline(repository, bm25, dense, config=RAGConfig(minimum_evidence=1))
+    bundle = pipeline.retrieve("妊娠患者有什么禁忌？")
+    assert bundle.status == EvidenceStatus.SUFFICIENT
+    assert bundle.evidence
+
+    # rebuild() from the repository (source of truth) must survive a real
+    # Chroma clear()+re-add without duplicating or losing chunks.
+    before = len(chroma_store)
+    dense.rebuild()
+    assert len(chroma_store) == before
+
+
 def test_dense_retriever_rebuild_clears_the_store_before_reindexing():
     repository, bm25, dense, ingestion = _runtime()
     ingestion.ingest_text(logical_id="g", title="G", content=TEXT)

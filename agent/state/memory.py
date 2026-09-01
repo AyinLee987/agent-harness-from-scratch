@@ -5,7 +5,9 @@
 * :class:`LongTermMemory` is a persistent-capable vector store. It defaults
   to an in-memory NumPy backend and accepts any :class:`~agent.vector_store.BaseVectorStore`
   implementation — e.g. :class:`~agent.vector_store.SQLiteVectorStore` for
-  persistence, or a future FAISS/Qdrant backend.
+  persistence, :class:`~agent.state.chroma_store.ChromaVectorStore` for a
+  real HNSW-indexed backend (optional ``chromadb`` dependency), or a future
+  Qdrant/pgvector backend.
 
 Both are intentionally simple; the README's design notes discuss what you'd
 swap in to scale them.
@@ -154,6 +156,10 @@ class LongTermMemory:
         # Persistent SQLite:
         store = SQLiteVectorStore("memory/knowledge.db")
         mem = LongTermMemory(llm, vector_store=store)
+
+        # Or a real HNSW-indexed backend (pip install chromadb):
+        from agent.state import ChromaVectorStore
+        mem = LongTermMemory(llm, vector_store=ChromaVectorStore(persist_directory="memory/chroma"))
 
     The public interface (``add``, ``search``, ``__len__``) is unchanged
     regardless of the backend.

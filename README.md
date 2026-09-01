@@ -486,9 +486,11 @@ right tool, avoid errors — is what makes the eval harness catch regressions
 instead of vibe-checking behavior.
 
 **What I'd change to scale this.** Make tool dispatch async so independent calls
-run concurrently; plug in a real vector DB (FAISS/Qdrant/pgvector) behind
-`BaseVectorStore` for both `LongTermMemory` and `DenseRetriever` — the interface
-is already there, no backend implements it yet; swap the extractive compressor for a
+run concurrently; past demo scale, default to `ChromaVectorStore` (HNSW
+indexed, not brute-force like the NumPy/SQLite backends) or a hosted
+Qdrant/pgvector — all plug into `LongTermMemory` and `DenseRetriever`
+identically via `BaseVectorStore`, this was already made pluggable rather
+than something still to build; swap the extractive compressor for a
 trained context encoder; add streaming and partial-result handling; and introduce
 a planner/executor split for multi-step tasks so a higher-level agent decomposes
 work and delegates to focused sub-agents.
@@ -525,6 +527,7 @@ agent/
     context.py       ExecutionContext: messages, steps, budget, run_id
     memory.py        ShortTermMemory + LongTermMemory (vector recall)
     store.py         BaseVectorStore → NumPy / SQLite / (FAISS / Qdrant future)
+    chroma_store.py  ChromaVectorStore — optional dep, HNSW-indexed
   multi_agent/       ← Leader/Worker delegation
     orchestrator.py  MultiAgentOrchestrator: spawn/await/cancel Worker tasks
     registry.py      AgentRegistry: named Worker factories (fresh agent per task)
@@ -812,10 +815,12 @@ form of user memory. It provides:
   reranker, metadata filters, and parent-context hydration — `DenseRetriever`
   delegates vector storage to a `BaseVectorStore` (default: in-memory
   `NumPyVectorStore`, same as `LongTermMemory`), so swapping in
-  `SQLiteVectorStore` for persistence, or a future Chroma/Qdrant/pgvector
-  backend, is a constructor argument (`DenseRetriever(repo, embeddings,
-  vector_store=...)`), not a rewrite — see `tests/test_vector_store.py` for
-  the backend-agnostic contract test suite;
+  `SQLiteVectorStore` for persistence, or `ChromaVectorStore` for a real
+  HNSW-indexed backend (optional `chromadb` dependency; a future
+  Qdrant/pgvector backend would plug in the same way), is a constructor
+  argument (`DenseRetriever(repo, embeddings, vector_store=...)`), not a
+  rewrite — see `tests/test_vector_store.py` for the backend-agnostic
+  contract test suite, parametrized over all three backends;
 - traceable evidence IDs and source citations, plus insufficient, stale,
   conflicting, degraded, and retrieval-failed states;
 - mandatory retrieval before the Leader's first model call and a recoverable

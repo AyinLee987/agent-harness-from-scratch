@@ -307,3 +307,36 @@ def test_sqlite_session_store_persists_messages_and_summary(tmp_path):
         assert reopened.load_messages("other-conversation") == []
     finally:
         reopened.close()
+
+
+try:
+    import chromadb  # noqa: F401
+    HAS_CHROMADB = True
+except ImportError:
+    HAS_CHROMADB = False
+
+
+@pytest.mark.skipif(not HAS_CHROMADB, reason="chromadb not installed")
+def test_long_term_memory_works_unchanged_with_a_chroma_vector_store(tmp_path):
+    """Same LongTermMemory public API (add/search), just backed by a real
+    Chroma collection instead of the default NumPyVectorStore -- proves the
+    vector_store= swap point actually works end to end, not just that
+    ChromaVectorStore satisfies the contract tests in isolation."""
+    from agent.state import ChromaVectorStore
+
+    store = ChromaVectorStore(persist_directory=str(tmp_path / "chroma"))
+    memory = LongTermMemory(
+        MockLLM(), vector_store=store, embedding_provider=TinyEmbeddingProvider()
+    )
+    memory.add("alpha fact")
+    memory.add("beta fact")
+    assert len(memory) == 2
+    assert memory.search("alpha", k=1)[0][0] == "alpha fact"
+
+    # Persistence: a second LongTermMemory pointed at the same Chroma
+    # directory sees what the first one wrote.
+    reopened_store = ChromaVectorStore(persist_directory=str(tmp_path / "chroma"))
+    reopened = LongTermMemory(
+        MockLLM(), vector_store=reopened_store, embedding_provider=TinyEmbeddingProvider()
+    )
+    assert len(reopened) == 2

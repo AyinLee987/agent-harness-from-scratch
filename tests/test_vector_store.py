@@ -2,10 +2,14 @@
 
 The goal is behavioral parity: a test written once against the abstract
 ``BaseVectorStore`` interface and parametrized over each concrete backend
-(``NumPyVectorStore``, ``SQLiteVectorStore``, and any future
-Chroma/Qdrant/pgvector implementation) instead of duplicating the same
+(``NumPyVectorStore``, ``SQLiteVectorStore``, ``ChromaVectorStore``, and any
+future Qdrant/pgvector implementation) instead of duplicating the same
 assertions per backend. Add a new backend to the ``store`` fixture's
 params and it's covered by every test below for free.
+
+The ``chroma`` backend is skipped when the optional ``chromadb`` package
+isn't installed (same pattern the live-LLM tests use for missing API keys)
+-- everything else here has zero optional dependencies.
 """
 
 from __future__ import annotations
@@ -14,12 +18,25 @@ import pytest
 
 from agent.state.store import BaseVectorStore, NumPyVectorStore, SQLiteVectorStore
 
+try:
+    import chromadb  # noqa: F401
+    HAS_CHROMADB = True
+except ImportError:
+    HAS_CHROMADB = False
 
-@pytest.fixture(params=["numpy", "sqlite"])
+
+@pytest.fixture(params=[
+    "numpy",
+    "sqlite",
+    pytest.param("chroma", marks=pytest.mark.skipif(not HAS_CHROMADB, reason="chromadb not installed")),
+])
 def store(request, tmp_path) -> BaseVectorStore:
     if request.param == "numpy":
         return NumPyVectorStore()
-    return SQLiteVectorStore(tmp_path / "vectors.db")
+    if request.param == "sqlite":
+        return SQLiteVectorStore(tmp_path / "vectors.db")
+    from agent.state.chroma_store import ChromaVectorStore
+    return ChromaVectorStore(persist_directory=str(tmp_path / "chroma"))
 
 
 def test_add_returns_a_usable_id_and_grows_length(store: BaseVectorStore):
