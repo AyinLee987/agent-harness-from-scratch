@@ -16,7 +16,8 @@ Public surface:
 * :class:`~agent.trigger.AgentGateway`
 * :class:`~agent.state.BaseVectorStore`,
   :class:`~agent.state.NumPyVectorStore`,
-  :class:`~agent.state.SQLiteVectorStore`
+  :class:`~agent.state.SQLiteVectorStore`,
+  :class:`~agent.state.ChromaVectorStore` (optional; requires ``chromadb``)
 """
 
 from .agent import AgentResult, ReActAgent
@@ -106,6 +107,7 @@ from .rag import (
 from .safety import ScanResult, ToolOutputGuard
 from .state import (
     BaseVectorStore,
+    ChromaVectorStore,
     ExecutionContext,
     LongTermMemory,
     MemoryRecord as LegacyMemoryRecord,
@@ -113,6 +115,7 @@ from .state import (
     ShortTermMemory,
     SQLiteVectorStore,
     Step,
+    VectorStoreConfigurationError,
 )
 from .tools import BaseTool, FunctionTool, ToolRegistry, tool
 from .trigger import (
@@ -220,6 +223,8 @@ __all__ = [
     "BaseVectorStore",
     "NumPyVectorStore",
     "SQLiteVectorStore",
+    "ChromaVectorStore",
+    "VectorStoreConfigurationError",
     # LLM
     "BaseLLM",
     "LLMResponse",

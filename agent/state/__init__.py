@@ -4,15 +4,17 @@ Components:
     - ExecutionContext: messages, steps, budget, run_id — all mutable run state
     - ShortTermMemory: sliding window + summarization fallback
     - LongTermMemory: persistent-capable vector recall
-    - VectorStore: pluggable backends (NumPy / SQLite / future FAISS, Qdrant)
+    - VectorStore: pluggable backends (NumPy / SQLite / Chroma / future FAISS, Qdrant)
 """
 
+from .chroma_store import ChromaVectorStore, VectorStoreConfigurationError
 from .context import ExecutionContext, Step
 from .memory import LongTermMemory, MemoryRecord, ShortTermMemory
 from .store import BaseVectorStore, NumPyVectorStore, SQLiteVectorStore
 
 __all__ = [
     "BaseVectorStore",
+    "ChromaVectorStore",
     "ExecutionContext",
     "LongTermMemory",
     "MemoryRecord",
@@ -20,4 +22,5 @@ __all__ = [
     "ShortTermMemory",
     "SQLiteVectorStore",
     "Step",
+    "VectorStoreConfigurationError",
 ]

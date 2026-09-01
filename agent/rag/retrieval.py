@@ -6,9 +6,10 @@ import math
 import re
 import threading
 from collections import Counter, defaultdict
-from typing import Dict, Iterable, List, Mapping, Protocol, Sequence
+from typing import Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from agent.memory.embeddings import EmbeddingProvider
+from agent.state.store import BaseVectorStore, NumPyVectorStore
 
 from .models import Chunk, Document, DocumentStatus, MedicalQuery, RetrievalFilters, RetrievalHit
 from .repository import RAGRepository
@@ -98,18 +99,33 @@ class BM25Retriever:
 
 
 class DenseRetriever:
+    """Embeds chunks and searches them by cosine similarity.
+
+    Vector storage is delegated to a :class:`~agent.state.store.BaseVectorStore`
+    (default: in-memory :class:`~agent.state.store.NumPyVectorStore`, matching
+    the original hardcoded behavior) so any backend implementing that
+    interface -- :class:`~agent.state.store.SQLiteVectorStore` for
+    persistence, or a future Chroma/Qdrant/pgvector backend -- can be swapped
+    in without touching this class or the callers that construct it.
+    """
+
     name = "dense"
 
-    def __init__(self, repository: RAGRepository, embeddings: EmbeddingProvider) -> None:
+    def __init__(
+        self,
+        repository: RAGRepository,
+        embeddings: EmbeddingProvider,
+        vector_store: Optional[BaseVectorStore] = None,
+    ) -> None:
         self.repository = repository
         self.embeddings = embeddings
-        self._vectors: Dict[str, List[float]] = {}
+        self._store = vector_store if vector_store is not None else NumPyVectorStore()
         self._lock = threading.RLock()
 
     def rebuild(self) -> None:
         chunks = self.repository.active_chunks()
         with self._lock:
-            self._vectors.clear()
+            self._store.clear()
         self._index(chunks)
 
     def index_document(self, document: Document, chunks: Sequence[Chunk]) -> None:
@@ -122,18 +138,33 @@ class DenseRetriever:
         if len(vectors) != len(chunks):
             raise ValueError("Embedding provider returned the wrong number of vectors.")
         with self._lock:
-            self._vectors.update({chunk.id: list(vector) for chunk, vector in zip(chunks, vectors)})
+            for chunk, vector in zip(chunks, vectors):
+                # record_id pins the store's id to the chunk's own id (an
+                # upsert if this chunk was already indexed) so search() can
+                # hand chunk ids straight back to the repository.
+                self._store.add(chunk.contextual_text, list(vector), record_id=chunk.id)
 
     def search(self, query: MedicalQuery, limit: int = 20) -> List[RetrievalHit]:
         vector = self.embeddings.embed_query(" ".join(query.semantic_queries) or query.normalized)
-        scored: List[tuple[str, float]] = []
         with self._lock:
-            for chunk_id, candidate in self._vectors.items():
-                chunk = self.repository.get_chunk(chunk_id)
-                document = self.repository.get_document(chunk.document_id) if chunk else None
-                if chunk and document and document_matches(document, chunk, query.filters):
-                    scored.append((chunk_id, cosine_similarity(vector, candidate)))
-        scored.sort(key=lambda item: item[1], reverse=True)
+            total = len(self._store)
+            if not total:
+                return []
+            # Ask the store for every candidate, not just `limit` -- filtering
+            # by document/jurisdiction/population happens *after* the vector
+            # search, so under-asking here could drop a match that would
+            # have made the cut. A real ANN backend swapped in later would
+            # want this over-fetch amount tuned instead of "everything";
+            # brute-force backends are the same cost either way.
+            hits = self._store.search(vector, k=total)
+        scored: List[Tuple[str, float]] = []
+        for chunk_id, _text, score in hits:
+            chunk = self.repository.get_chunk(chunk_id)
+            document = self.repository.get_document(chunk.document_id) if chunk else None
+            if chunk and document and document_matches(document, chunk, query.filters):
+                scored.append((chunk_id, score))
+        # `hits` is already sorted by score descending; filtering preserves
+        # that order, so no re-sort is needed.
         return [RetrievalHit(item, score, rank + 1, self.name) for rank, (item, score) in enumerate(scored[:limit])]
 
 
