@@ -486,8 +486,9 @@ right tool, avoid errors — is what makes the eval harness catch regressions
 instead of vibe-checking behavior.
 
 **What I'd change to scale this.** Make tool dispatch async so independent calls
-run concurrently; replace the in-memory NumPy store with a real vector DB
-(FAISS/Qdrant/pgvector) and persist it; swap the extractive compressor for a
+run concurrently; plug in a real vector DB (FAISS/Qdrant/pgvector) behind
+`BaseVectorStore` for both `LongTermMemory` and `DenseRetriever` — the interface
+is already there, no backend implements it yet; swap the extractive compressor for a
 trained context encoder; add streaming and partial-result handling; and introduce
 a planner/executor split for multi-step tasks so a higher-level agent decomposes
 work and delegates to focused sub-agents.
@@ -808,7 +809,13 @@ form of user memory. It provides:
 - staged ingestion, checksum deduplication, atomic publication, version
   supersession, and SQLite persistence;
 - BM25 plus dedicated dense embeddings, reciprocal-rank fusion, a replaceable
-  reranker, metadata filters, and parent-context hydration;
+  reranker, metadata filters, and parent-context hydration — `DenseRetriever`
+  delegates vector storage to a `BaseVectorStore` (default: in-memory
+  `NumPyVectorStore`, same as `LongTermMemory`), so swapping in
+  `SQLiteVectorStore` for persistence, or a future Chroma/Qdrant/pgvector
+  backend, is a constructor argument (`DenseRetriever(repo, embeddings,
+  vector_store=...)`), not a rewrite — see `tests/test_vector_store.py` for
+  the backend-agnostic contract test suite;
 - traceable evidence IDs and source citations, plus insufficient, stale,
   conflicting, degraded, and retrieval-failed states;
 - mandatory retrieval before the Leader's first model call and a recoverable

@@ -36,14 +36,29 @@ class BaseVectorStore(ABC):
     """Abstract interface for a vector store.
 
     Every backend must implement :meth:`add`, :meth:`search`, :meth:`delete`,
-    :meth:`all`, and ``__len__``.
+    :meth:`clear`, :meth:`all`, and ``__len__``.
     """
 
     @abstractmethod
     def add(
-        self, text: str, embedding: List[float], metadata: Optional[Dict[str, Any]] = None
+        self,
+        text: str,
+        embedding: List[float],
+        metadata: Optional[Dict[str, Any]] = None,
+        record_id: Optional[str] = None,
     ) -> str:
-        """Store a text + embedding pair. Returns a unique record id."""
+        """Store a text + embedding pair. Returns the record id.
+
+        ``record_id`` lets a caller that already has a stable identity for
+        the record (e.g. a RAG chunk id derived from document content) pin
+        the vector store's id to it instead of getting a random one back —
+        every real vector database (Chroma, Qdrant, pgvector...) expects the
+        caller to supply ids this way, so backends should accept one here
+        too. Adding with a ``record_id`` that already exists **upserts**
+        (replaces the existing record) rather than erroring, matching that
+        same real-world convention. When omitted, a random id is generated,
+        preserving the original zero-config behavior.
+        """
 
     @abstractmethod
     def search(
@@ -54,6 +69,10 @@ class BaseVectorStore(ABC):
     @abstractmethod
     def delete(self, record_id: str) -> bool:
         """Remove a record by id. Return ``True`` if it existed."""
+
+    @abstractmethod
+    def clear(self) -> None:
+        """Remove every record. Used for a full from-scratch rebuild."""
 
     @abstractmethod
     def all(self) -> List[Dict[str, Any]]:
@@ -87,18 +106,25 @@ class NumPyVectorStore(BaseVectorStore):
 
     # -- BaseVectorStore interface ------------------------------------------
     def add(
-        self, text: str, embedding: List[float], metadata: Optional[Dict[str, Any]] = None
+        self,
+        text: str,
+        embedding: List[float],
+        metadata: Optional[Dict[str, Any]] = None,
+        record_id: Optional[str] = None,
     ) -> str:
-        record_id = uuid.uuid4().hex[:12]
-        self._records.append(
-            {
-                "id": record_id,
-                "text": text,
-                "embedding": np.asarray(embedding, dtype=np.float32),
-                "metadata": metadata or {},
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-        )
+        record_id = record_id or uuid.uuid4().hex[:12]
+        record = {
+            "id": record_id,
+            "text": text,
+            "embedding": np.asarray(embedding, dtype=np.float32),
+            "metadata": metadata or {},
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        for index, existing in enumerate(self._records):
+            if existing["id"] == record_id:
+                self._records[index] = record  # upsert
+                return record_id
+        self._records.append(record)
         return record_id
 
     def search(
@@ -118,6 +144,9 @@ class NumPyVectorStore(BaseVectorStore):
         before = len(self._records)
         self._records = [r for r in self._records if r["id"] != record_id]
         return len(self._records) < before
+
+    def clear(self) -> None:
+        self._records = []
 
     def all(self) -> List[Dict[str, Any]]:
         return [
@@ -203,12 +232,16 @@ class SQLiteVectorStore(BaseVectorStore):
 
     # -- BaseVectorStore interface ------------------------------------------
     def add(
-        self, text: str, embedding: List[float], metadata: Optional[Dict[str, Any]] = None
+        self,
+        text: str,
+        embedding: List[float],
+        metadata: Optional[Dict[str, Any]] = None,
+        record_id: Optional[str] = None,
     ) -> str:
-        record_id = uuid.uuid4().hex[:12]
+        record_id = record_id or uuid.uuid4().hex[:12]
         self._conn.execute(
             """
-            INSERT INTO vectors (id, text, embedding, metadata, created_at)
+            INSERT OR REPLACE INTO vectors (id, text, embedding, metadata, created_at)
             VALUES (?, ?, ?, ?, ?)
             """,
             (
@@ -245,6 +278,10 @@ class SQLiteVectorStore(BaseVectorStore):
         cur = self._conn.execute("DELETE FROM vectors WHERE id = ?", (record_id,))
         self._conn.commit()
         return cur.rowcount > 0
+
+    def clear(self) -> None:
+        self._conn.execute("DELETE FROM vectors")
+        self._conn.commit()
 
     def all(self) -> List[Dict[str, Any]]:
         rows = self._conn.execute(

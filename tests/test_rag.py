@@ -13,6 +13,7 @@ from agent.rag import (
     RAGContextProvider, RAGIngestionService, RAGPipeline,
     RetrievalFilters, SQLiteRAGRepository, create_rag_search_tool,
 )
+from agent.state.store import NumPyVectorStore, SQLiteVectorStore
 
 
 TEXT = """# 高血压治疗
@@ -184,3 +185,56 @@ def test_ingestion_failure_never_publishes_document():
         ingestion.ingest_text(logical_id="g", title="G", content=TEXT)
     assert repository.list_documents()[0].status == DocumentStatus.FAILED
     assert repository.active_chunks() == []
+
+
+def test_dense_retriever_defaults_to_an_in_memory_numpy_store():
+    repository = InMemoryRAGRepository()
+    embeddings = LLMEmbeddingProvider(MockLLM(), model_id="test:hash")
+    dense = DenseRetriever(repository, embeddings)
+    assert isinstance(dense._store, NumPyVectorStore)
+
+
+def test_dense_retriever_accepts_a_swapped_in_vector_store(tmp_path: Path):
+    """The whole point of the refactor: DenseRetriever no longer hardcodes
+    its own vector dict -- any BaseVectorStore backend works identically,
+    same as LongTermMemory's vector_store= parameter."""
+    repository, bm25, _default_dense, ingestion = _runtime()
+    sqlite_store = SQLiteVectorStore(tmp_path / "dense.db")
+    embeddings = LLMEmbeddingProvider(MockLLM(), model_id="test:hash")
+    dense = DenseRetriever(repository, embeddings, vector_store=sqlite_store)
+    ingestion = RAGIngestionService(
+        repository, MedicalParentChildChunker(target_tokens=80, min_tokens=20, max_tokens=120),
+        [bm25, dense],
+    )
+    ingestion.ingest_text(
+        logical_id="guide/hypertension", title="高血压指南", content=TEXT,
+        publisher="权威学会", document_type="guideline", jurisdiction="CN",
+    )
+    assert len(sqlite_store) > 0
+
+    pipeline = RAGPipeline(repository, bm25, dense, config=RAGConfig(minimum_evidence=1))
+    bundle = pipeline.retrieve("妊娠患者有什么禁忌？")
+    assert bundle.status == EvidenceStatus.SUFFICIENT
+    assert bundle.evidence
+
+
+def test_dense_retriever_rebuild_clears_the_store_before_reindexing():
+    repository, bm25, dense, ingestion = _runtime()
+    ingestion.ingest_text(logical_id="g", title="G", content=TEXT)
+    before = len(dense._store)
+    assert before > 0
+
+    dense.rebuild()
+    # Same active chunks re-indexed by the same (content-derived) ids should
+    # upsert back to the same count, not double up.
+    assert len(dense._store) == before
+
+
+def test_dense_retriever_search_hits_map_back_to_real_chunk_ids():
+    repository, bm25, dense, ingestion = _runtime()
+    ingestion.ingest_text(logical_id="g", title="G", content=TEXT)
+    pipeline = RAGPipeline(repository, bm25, dense, config=RAGConfig(minimum_evidence=1))
+    bundle = pipeline.retrieve("成人高血压推荐意见")
+    assert bundle.evidence
+    for item in bundle.evidence:
+        assert repository.get_chunk(item.chunk.id) is not None
