@@ -718,6 +718,39 @@ dimension on each memory. The old `LongTermMemory(llm)` constructor remains as a
 compatibility adapter; production code should configure a dedicated embedding
 provider and rebuild/version indexes when changing models.
 
+### Trying it live (web UI / API)
+
+Off by default — the live agent (`app/server.py`, what the web UI and `/api/*`
+talk to) has no memory tools until you opt in:
+
+```bash
+ENABLE_LONG_TERM_MEMORY=1     # adds a memory_search tool + write-on-"remember" hook
+MEMORY_DB_PATH=data/memory.sqlite
+# MEMORY_EMBEDDING_MODEL=...  # falls back to RAG_EMBEDDING_* / OPENAI_* if unset
+```
+
+Every request shares one fixed `namespace`/`subject_id` (there's no
+auth/account system in this server) — a "remember ..." said in one
+conversation is recallable from any other conversation, by design.
+`GET /api/memory` lists every active record for debugging.
+
+**A real, empirically-observed conflict:** typing "请记住我喜欢咖啡" in one
+conversation, then "请记住我不喜欢咖啡" in a fresh one, produces **two
+separate ACTIVE records** — there is no automatic contradiction detection or
+merge (see the Lifecycle paragraph above: only an explicit `supersede()` call
+retires an old record, and nothing triggers one here). Interestingly, the
+model's own reply to the second message claimed "I've updated my records" —
+it had called `memory_search`, seen the conflicting old record, and narrated
+an update — but the system actually just inserted a new record; the old one
+was untouched. Asking a third, fresh conversation "你还记得我对咖啡的态度
+吗？" made the model call `memory_search`, retrieve **both** contradictory
+records (cosine scores 0.74 and 0.66), and surface the conflict to the user
+directly rather than picking one silently. So: recall works and conflicts
+are visible to the user, but reconciling them is left entirely to the model's
+judgment in the moment — the same "no automatic conflict resolution" gap the
+RAG evidence pipeline explicitly detects (`EvidenceConflict`) but the memory
+system does not.
+
 ## Conversation continuity
 
 `ReActLoop.run()` builds a brand-new `ExecutionContext` on every call — by

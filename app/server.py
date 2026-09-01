@@ -59,7 +59,10 @@ from agent import (
     AgentResult,
     ContextProvider,
     DeepSeekLLM,
+    ExplicitRequestMemoryExtractor,
     FatalToolError,
+    MemoryManager,
+    MemoryStatus,
     MockLLM,
     MultiAgentOrchestrator,
     LocalToolConfig,
@@ -73,6 +76,7 @@ from agent import (
     RAGPipeline,
     SessionContextProvider,
     SessionMemoryStore,
+    SQLiteMemoryRepository,
     SQLiteRAGRepository,
     SQLiteSessionStore,
     create_rag_search_tool,
@@ -228,6 +232,16 @@ MCP_MANAGER = None
 RAG_REPOSITORY = None
 RAG_PIPELINE = None
 RAG_INGESTION = None
+MEMORY_MANAGER: Optional[MemoryManager] = None
+# There's no auth/user system in this server -- every request is a single
+# local deployment, distinguished only by its (optional) conversation_id.
+# So long-term memory uses one fixed namespace/subject for everyone: a
+# "remember ..." in one conversation is recallable from any other
+# conversation, which is the point (persistent facts about *the* user, not
+# a conversation-scoped fact). If this server ever grows real accounts,
+# memory_subject_id should become per-authenticated-user instead.
+MEMORY_NAMESPACE = "default"
+MEMORY_SUBJECT_ID = "web-ui"
 OUTPUT_GUARD = ToolOutputGuard()
 # Swapped for a SQLiteSessionStore in lifespan() startup; kept as a
 # dependency-free default here so importing this module (e.g. from a test
@@ -297,6 +311,55 @@ def _start_rag():
     RAG_PIPELINE = RAGPipeline(repository, bm25, dense)
     RAG_INGESTION = ingestion
     log_event(logger, logging.INFO, "rag.started", document_count=len(repository.list_documents()))
+
+
+def _start_memory():
+    """Build the policy-controlled long-term memory runtime, if enabled.
+
+    Off by default. When on, the Leader gets a ``memory_search`` tool (model
+    decides when to recall, same philosophy as RAG's search tool) and every
+    successful run is passed through ``ExplicitRequestMemoryExtractor`` +
+    ``DefaultMemoryPolicy`` -- only an explicit "remember ..."/"记住..."
+    message ever gets persisted, nothing is inferred from ordinary
+    conversation. See ``agent/memory/policy.py``.
+    """
+    global MEMORY_MANAGER
+    if not _enabled("ENABLE_LONG_TERM_MEMORY"):
+        return
+    model = (
+        os.getenv("MEMORY_EMBEDDING_MODEL")
+        or os.getenv("RAG_EMBEDDING_MODEL")
+        or os.getenv("OPENAI_EMBED_MODEL")
+    )
+    if not model:
+        raise RuntimeError("ENABLE_LONG_TERM_MEMORY=1 requires MEMORY_EMBEDDING_MODEL.")
+    api_key = (
+        os.getenv("MEMORY_EMBEDDING_API_KEY")
+        or os.getenv("RAG_EMBEDDING_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+    )
+    base_url = (
+        os.getenv("MEMORY_EMBEDDING_BASE_URL")
+        or os.getenv("RAG_EMBEDDING_BASE_URL")
+        or os.getenv("OPENAI_BASE_URL")
+    )
+    db_path = os.getenv("MEMORY_DB_PATH", "data/memory.sqlite")
+    repository = SQLiteMemoryRepository(db_path)
+    embeddings = OpenAICompatibleEmbeddingProvider(
+        model=model, api_key=api_key, base_url=base_url, provider_name="memory",
+    )
+    manager = MemoryManager(
+        embeddings,
+        repository=repository,
+        extractor=ExplicitRequestMemoryExtractor(),
+    )
+    # Records may already exist from a prior process (SQLite persists); the
+    # vector index is derived/in-memory and starts empty every boot, so it
+    # must be rebuilt from the repository (the source of truth) before any
+    # recall can find them.
+    restored = manager.rebuild_index()
+    MEMORY_MANAGER = manager
+    log_event(logger, logging.INFO, "memory.started", restored_record_count=restored)
 
 
 LEADER_SYSTEM_PROMPT = (
@@ -372,6 +435,10 @@ def _build_leader_runtime(
     )
     if RAG_PIPELINE:
         leader_registry.register(create_rag_search_tool(RAG_PIPELINE))
+    if MEMORY_MANAGER:
+        leader_registry.register(MEMORY_MANAGER.as_search_tool(
+            namespace=MEMORY_NAMESPACE, subject_id=MEMORY_SUBJECT_ID,
+        ))
     leader_registry.register_many(orchestrator.leader_tools())
     context_providers: List[ContextProvider] = []
     if RAG_PIPELINE:
@@ -385,6 +452,9 @@ def _build_leader_runtime(
         max_steps=max_steps,
         agent_name="leader",
         context_providers=context_providers or None,
+        memory_manager=MEMORY_MANAGER,
+        memory_namespace=MEMORY_NAMESPACE,
+        memory_subject_id=MEMORY_SUBJECT_ID,
     )
     return orchestrator, leader
 
@@ -399,10 +469,11 @@ def _start_session_store() -> SessionMemoryStore:
 async def lifespan(_app: FastAPI):
     """Connect explicitly enabled MCP servers and close them on shutdown."""
 
-    global MCP_MANAGER, RAG_REPOSITORY, RAG_PIPELINE, RAG_INGESTION, SESSION_STORE
+    global MCP_MANAGER, RAG_REPOSITORY, RAG_PIPELINE, RAG_INGESTION, MEMORY_MANAGER, SESSION_STORE
     manager = None
     try:
         await asyncio.to_thread(_start_rag)
+        await asyncio.to_thread(_start_memory)
         SESSION_STORE = await asyncio.to_thread(_start_session_store)
         if _fetch_mcp_enabled():
             try:
@@ -435,6 +506,9 @@ async def lifespan(_app: FastAPI):
         RAG_REPOSITORY = None
         RAG_PIPELINE = None
         RAG_INGESTION = None
+        if MEMORY_MANAGER is not None and isinstance(MEMORY_MANAGER.repository, SQLiteMemoryRepository):
+            await asyncio.to_thread(MEMORY_MANAGER.repository.close)
+        MEMORY_MANAGER = None
         if isinstance(SESSION_STORE, SQLiteSessionStore):
             await asyncio.to_thread(SESSION_STORE.close)
         SESSION_STORE = InMemorySessionStore()
@@ -611,6 +685,37 @@ async def list_tools():
         return {"tools": leader.tools.schemas()}
     finally:
         orchestrator.close()
+
+
+@app.get("/api/memory")
+async def list_memory():
+    """Debug/introspection: every ACTIVE long-term memory record.
+
+    Read-only, no pagination -- meant for inspecting what got persisted
+    while testing (e.g. confirming two contradictory "remember ..."
+    statements both landed as separate records), not as a production API.
+    404s with a clear reason if ENABLE_LONG_TERM_MEMORY isn't set.
+    """
+    if MEMORY_MANAGER is None:
+        raise HTTPException(404, "Long-term memory is not enabled (set ENABLE_LONG_TERM_MEMORY=1).")
+
+    def _list():
+        records = MEMORY_MANAGER.repository.list_records(
+            namespace=MEMORY_NAMESPACE, subject_id=MEMORY_SUBJECT_ID, status=MemoryStatus.ACTIVE,
+        )
+        return [
+            {
+                "id": r.id,
+                "content": r.content,
+                "kind": r.kind.value,
+                "created_at": r.created_at.isoformat(),
+                "source_run_id": r.source_run_id,
+            }
+            for r in sorted(records, key=lambda r: r.created_at)
+        ]
+
+    records = await asyncio.to_thread(_list)
+    return {"namespace": MEMORY_NAMESPACE, "subject_id": MEMORY_SUBJECT_ID, "records": records}
 
 
 @app.post("/api/run", response_model=RunResponse)
