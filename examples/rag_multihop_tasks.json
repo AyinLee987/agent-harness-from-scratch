@@ -1,0 +1,32 @@
+[
+  {
+    "id": "parallel_analgesic",
+    "type": "parallel",
+    "prompt": "妊娠期间能不能用镇痛药X？另外它的成人推荐剂量是多少？",
+    "expect_substrings": ["禁忌", "400"]
+  },
+  {
+    "id": "parallel_antipyretic",
+    "type": "parallel",
+    "prompt": "退烧药Z能不能用于新生儿？它的成人推荐剂量是多少？",
+    "expect_substrings": ["禁止", "500"]
+  },
+  {
+    "id": "parallel_bisphosphonate",
+    "type": "parallel",
+    "prompt": "肾功能不全的患者能不能用双膦酸盐类药物M？它的成人推荐剂量是多少？",
+    "expect_substrings": ["禁忌", "70"]
+  },
+  {
+    "id": "sequential_htn_elderly",
+    "type": "sequential",
+    "prompt": "成人高血压的一线用药在老年人群体的推荐剂量是多少？",
+    "expect_substrings": ["2.5"]
+  },
+  {
+    "id": "sequential_pneumonia_pregnancy",
+    "type": "sequential",
+    "prompt": "治疗成人社区获得性肺炎的一线药物，孕妇能不能用？",
+    "expect_substrings": ["抗生素Q", "C级"]
+  }
+]

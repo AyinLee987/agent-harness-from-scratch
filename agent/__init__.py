@@ -97,12 +97,12 @@ from .observability import (
     sanitize,
 )
 from .rag import (
-    BM25Retriever, CallableReranker, Chunk, Citation, DenseRetriever, Document,
+    BM25Retriever, CallableReranker, Chunk, Citation, CitationCounter, DenseRetriever, Document,
     DocumentStatus, Evidence, EvidenceBundle, EvidenceConflict, EvidenceStatus,
-    HeuristicReranker, InMemoryRAGRepository, MedicalParentChildChunker,
-    MedicalQueryPlanner, RAGConfig, RAGContextProvider, RAGIngestionService,
-    RAGPipeline, RetrievalFilters, SQLiteRAGRepository, create_rag_search_tool,
-    format_evidence_context,
+    HeuristicReranker, InMemoryRAGRepository, LLMQueryDecomposer, MedicalParentChildChunker,
+    MedicalQueryPlanner, QueryDecomposer, QueryDecomposition, RAGConfig, RAGContextProvider,
+    RAGIngestionService, RAGPipeline, RetrievalFilters, SQLiteRAGRepository,
+    create_rag_search_tool, format_evidence_context,
 )
 from .safety import ScanResult, ToolOutputGuard
 from .state import (
@@ -202,7 +202,8 @@ __all__ = [
     "InMemoryRAGRepository", "SQLiteRAGRepository", "BM25Retriever",
     "DenseRetriever", "HeuristicReranker", "CallableReranker", "RAGConfig",
     "RAGPipeline", "RAGContextProvider", "create_rag_search_tool",
-    "format_evidence_context",
+    "format_evidence_context", "QueryDecomposer", "QueryDecomposition",
+    "LLMQueryDecomposer", "CitationCounter",
     # Observability
     "configure_logging",
     "bind_log_context",
