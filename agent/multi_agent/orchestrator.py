@@ -16,7 +16,7 @@ from typing import Dict, Iterator, List, Optional, Sequence
 
 from ..agent import ReActAgent
 from ..errors import FatalToolError, RecoverableToolError
-from ..observability import bind_log_context, get_logger, log_event
+from ..observability import bind_log_context, get_logger, log_event, run_log_file
 from ..tools import BaseTool
 from .models import (
     TERMINAL_TASK_STATUSES,
@@ -122,7 +122,9 @@ class MultiAgentOrchestrator:
         with self._condition:
             self._roots[root_run_id] = _RootState(root_run_id=root_run_id)
         token = self._active_root.set(root_run_id)
-        with bind_log_context(root_run_id=root_run_id, agent_name="leader"):
+        with bind_log_context(
+            root_run_id=root_run_id, agent_name="leader"
+        ), run_log_file(root_run_id, id_field="root_run_id"):
             log_event(logger, logging.INFO, "multi_agent.root.started")
             try:
                 yield root_run_id

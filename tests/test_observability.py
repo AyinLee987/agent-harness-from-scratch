@@ -11,6 +11,7 @@ from agent import (
     current_log_context,
     get_logger,
     log_event,
+    run_log_file,
 )
 
 
@@ -100,6 +101,43 @@ def test_json_formatter_truncates_large_fields(monkeypatch):
     record.event_fields = {"value": "abcdefghijklmnop"}
     payload = json.loads(JsonFormatter().format(record))
     assert payload["value"] == "abcdefgh...[truncated]"
+
+
+def test_run_log_file_writes_only_matching_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LOG_PER_RUN", "true")
+    logger = configure_logging(
+        level="INFO", format_name="json", stream=io.StringIO(), log_file="", force=True
+    )
+
+    with bind_log_context(run_id="run-a"), run_log_file(
+        "run-a", log_dir=str(tmp_path)
+    ) as path_a:
+        log_event(logger, logging.INFO, "a.only", note="from run a")
+        with bind_log_context(run_id="run-b"):
+            log_event(logger, logging.INFO, "b.only", note="from run b")
+
+    files = sorted(tmp_path.glob("*_run-a.log"))
+    assert len(files) == 1
+    assert path_a == files[0]
+    lines = files[0].read_text(encoding="utf-8").splitlines()
+    events = [json.loads(line) for line in lines]
+    assert [e["event"] for e in events] == ["a.only"]
+    assert events[0]["run_id"] == "run-a"
+
+
+def test_run_log_file_disabled_via_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LOG_PER_RUN", "false")
+    logger = configure_logging(
+        level="INFO", format_name="json", stream=io.StringIO(), log_file="", force=True
+    )
+
+    with bind_log_context(run_id="run-c"), run_log_file(
+        "run-c", log_dir=str(tmp_path)
+    ) as path_c:
+        assert path_c is None
+        log_event(logger, logging.INFO, "c.only")
+
+    assert list(tmp_path.glob("*.log")) == []
 
 
 def test_exception_logs_keep_stack_but_omit_exception_message():

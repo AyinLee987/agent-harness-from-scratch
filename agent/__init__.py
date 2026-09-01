@@ -92,6 +92,7 @@ from .observability import (
     current_log_context,
     get_logger,
     log_event,
+    run_log_file,
     sanitize,
 )
 from .rag import (
@@ -205,6 +206,7 @@ __all__ = [
     "current_log_context",
     "get_logger",
     "log_event",
+    "run_log_file",
     "sanitize",
     "JsonFormatter",
     "TextFormatter",

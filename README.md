@@ -775,6 +775,18 @@ is for). Once a conversation passes 24 stored messages, older messages are
 folded into a single persisted summary instead of being replayed (and
 re-summarized by `ShortTermMemory`) in full on every subsequent turn.
 
+`GET /api/stream` persists the user's message as soon as the run starts
+(`SessionContextProvider.record_user_message`), *before* streaming begins —
+not bundled with the final answer at the end. A run that never reaches a
+clean answer (the client disconnects mid-stream, e.g. a page refresh; the
+budget runs out; a tool error is fatal; the run is cancelled) still leaves
+the question in `SESSION_STORE`, so a conversation never appears to have
+vanished on reload — only the assistant's reply can be missing, which
+accurately reflects that the run didn't finish. `POST /api/run` has no such
+gap: `record_turn` there runs only after `execute()` returns, but `result.answer`
+is always populated (`ReActLoop._force_finish` guarantees it even on a
+budget/error stop), so both sides are written together unconditionally.
+
 ## Structured logging
 
 The FastAPI server configures structured logging automatically. Every request
@@ -785,17 +797,31 @@ Worker, LLM, tool, and MCP events. Multi-agent events additionally carry
 ```dotenv
 AGENT_LOG_LEVEL=INFO          # DEBUG, INFO, WARNING, ERROR
 AGENT_LOG_FORMAT=json         # json or text
-AGENT_LOG_FILE=logs/agent.log # optional rotating file; stderr is always enabled
+AGENT_LOG_FILE=              # optional extra single file (all runs interleaved); stderr is always enabled
 AGENT_LOG_MAX_BYTES=10485760
 AGENT_LOG_BACKUP_COUNT=5
+
+AGENT_LOG_PER_RUN=true       # write one log file per run under AGENT_LOG_DIR
+AGENT_LOG_DIR=logs
 ```
 
-Library users can initialize the same setup with `configure_logging()`. Stable
-event names include `http.request.*`, `agent.run.*`, `llm.call.*`,
-`tool.call.*`, `mcp.*`, and `subagent.*`. Logs record sizes, argument key names,
-token counts, statuses, and timings—not prompt text, tool arguments, model
-answers, or tool output. Known credential fields such as `api_key`,
-`authorization`, `password`, and access tokens are redacted automatically.
+Each `ReActLoop.run()` (a single agent run, including every Worker a Leader
+dispatches) writes its own `logs/<timestamp>_<run_id>.log`. A multi-agent run
+additionally gets a `logs/<timestamp>_<root_run_id>.log` that aggregates the
+Leader's own events plus every Worker's `subagent.*` lifecycle events, so you
+can follow one session end-to-end without wading through other runs. This
+replaces the old setup where every run appended to a single ever-growing
+`AGENT_LOG_FILE`; set `AGENT_LOG_PER_RUN=false` to go back to stderr (and
+`AGENT_LOG_FILE`) only.
+
+Library users can initialize the same setup with `configure_logging()`, and
+opt individual runs into per-run files with `run_log_file(run_id)` (see
+`agent/observability.py`). Stable event names include `http.request.*`,
+`agent.run.*`, `llm.call.*`, `tool.call.*`, `mcp.*`, and `subagent.*`. Logs
+record sizes, argument key names, token counts, statuses, and timings—not
+prompt text, tool arguments, model answers, or tool output. Known credential
+fields such as `api_key`, `authorization`, `password`, and access tokens are
+redacted automatically.
 
 ## Governed hybrid RAG
 

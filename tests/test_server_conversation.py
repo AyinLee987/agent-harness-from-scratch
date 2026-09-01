@@ -117,6 +117,30 @@ def test_stream_persists_only_user_message_and_final_answer(monkeypatch):
     ]
 
 
+def test_stream_persists_the_user_message_even_if_the_client_disconnects_early(monkeypatch):
+    """Regression test: a stream that never finishes iterating (the client
+    refreshed/disconnected mid-run) must not lose the question — only the
+    assistant's side is allowed to be missing. See agent/memory/context.py's
+    record_user_message for why."""
+
+    monkeypatch.setattr(server, "_build_llm", _NameRememberingLLM)
+
+    async def abandon_mid_stream():
+        response = await server.stream(
+            "My name is Zhuoyang.", conversation_id="conv-stream-disconnect"
+        )
+        agen = response.body_iterator
+        await agen.__anext__()  # consume exactly one chunk, like an abandoned client
+        await agen.aclose()  # simulate the disconnect tearing the generator down
+
+    asyncio.run(abandon_mid_stream())
+
+    stored = server.SESSION_STORE.load_messages("conv-stream-disconnect")
+    assert [(m["role"], m["content"]) for m in stored] == [
+        ("user", "My name is Zhuoyang."),
+    ]
+
+
 def test_conversation_messages_returns_empty_list_for_a_fresh_conversation_id():
     result = asyncio.run(server.conversation_messages("brand-new-conv"))
 

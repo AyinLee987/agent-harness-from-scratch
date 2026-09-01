@@ -147,6 +147,74 @@ class TextFormatter(logging.Formatter):
         return text
 
 
+class _ContextIdFilter(logging.Filter):
+    """Pass only records emitted while ``field`` equals ``value`` in context.
+
+    The check reads :data:`_CONTEXT` at emit time, in whatever thread is doing
+    the logging -- not the thread that created the handler -- so this works
+    even when the run being isolated executes on a worker thread (e.g. a
+    subagent dispatched by the multi-agent orchestrator).
+    """
+
+    def __init__(self, field: str, value: str) -> None:
+        super().__init__()
+        self._field = field
+        self._value = value
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003 - stdlib API
+        return _CONTEXT.get().get(self._field) == self._value
+
+
+@contextmanager
+def run_log_file(
+    run_id: str,
+    *,
+    id_field: str = "run_id",
+    log_dir: Optional[str] = None,
+    format_name: Optional[str] = None,
+) -> Iterator[Optional[Path]]:
+    """Attach a dedicated per-run log file under ``logs/`` for one run.
+
+    Every :func:`log_event` call made while ``id_field`` (default ``run_id``)
+    is bound to ``run_id`` via :func:`bind_log_context` is written to
+    ``<log_dir>/<timestamp>_<run_id>.log``, in addition to whatever handlers
+    :func:`configure_logging` already set up. Concurrent runs each get their
+    own clean file because the filter checks the *emitting* call's context,
+    not the context at handler-creation time.
+
+    Set ``AGENT_LOG_PER_RUN=false`` to disable (the context manager then
+    yields ``None`` and attaches no handler). Directory defaults to
+    ``AGENT_LOG_DIR`` or ``"logs"``.
+    """
+
+    if not _env_bool("AGENT_LOG_PER_RUN", True):
+        yield None
+        return
+
+    directory = Path(log_dir or os.getenv("AGENT_LOG_DIR", "logs")).expanduser()
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    path = directory / f"{stamp}_{run_id}.log"
+
+    formatter: logging.Formatter
+    if (format_name or os.getenv("AGENT_LOG_FORMAT", "json")).lower() == "text":
+        formatter = TextFormatter()
+    else:
+        formatter = JsonFormatter()
+
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(formatter)
+    handler.addFilter(_ContextIdFilter(id_field, run_id))
+
+    target = logging.getLogger("agent")
+    target.addHandler(handler)
+    try:
+        yield path
+    finally:
+        target.removeHandler(handler)
+        handler.close()
+
+
 def configure_logging(
     *,
     level: Optional[str] = None,
@@ -263,6 +331,13 @@ def _env_int(name: str, default: int) -> int:
         return int(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
 
 
 def _safe_exception(exc_info: Any) -> Dict[str, Any]:

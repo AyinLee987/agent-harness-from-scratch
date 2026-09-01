@@ -23,7 +23,7 @@ from ..context import ContextProvider
 from ..errors import FatalToolError
 from ..llm import BaseLLM, LLMResponse, ToolCall, estimate_tokens
 from ..memory import MemoryManager, RunCompletedEvent
-from ..observability import bind_log_context, get_logger, log_event
+from ..observability import bind_log_context, get_logger, log_event, run_log_file
 from ..safety import ToolOutputGuard
 from ..state.context import ExecutionContext, Step
 from ..state.memory import LongTermMemory, ShortTermMemory
@@ -148,7 +148,9 @@ class ReActLoop:
         ctx.add_message("user", task)
 
         started = time.perf_counter()
-        with bind_log_context(run_id=ctx.run_id, agent_name=self.agent_name):
+        with bind_log_context(run_id=ctx.run_id, agent_name=self.agent_name), run_log_file(
+            ctx.run_id
+        ):
             log_event(
                 logger,
                 logging.INFO,

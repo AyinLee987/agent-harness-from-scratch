@@ -747,6 +747,15 @@ async def stream(
         root_run_id = ""
         final_answer: Optional[str] = None
 
+        # Persist the question the moment the run starts, not after it
+        # finishes — a disconnect (e.g. the client refreshing mid-stream) or
+        # a run that never reaches a clean "answer" event (budget exhausted,
+        # fatal tool error, cancelled) would otherwise leave nothing in
+        # SESSION_STORE for this turn, so the conversation can look like it
+        # vanished on the next reload even though it clearly happened.
+        if session_provider is not None:
+            await asyncio.to_thread(session_provider.record_user_message, task)
+
         try:
             with orchestrator.leader_scope() as root_run_id:
                 with bind_log_context(run_id=ctx.run_id, agent_name="leader"):
@@ -792,11 +801,15 @@ async def stream(
                         elapsed_ms=round((time.perf_counter() - stream_started) * 1000, 2),
                     )
 
-            # Only a run that actually produced a final answer is worth
-            # remembering — a cancelled/budget/fatal-error stop has nothing
-            # coherent to attribute to the assistant's side of the turn.
+            # The question was already persisted as soon as the run started
+            # (see above). Only a run that actually produced a final answer
+            # has anything coherent to add for the assistant's side — a
+            # cancelled/budget/fatal-error stop just leaves the question
+            # standing alone, which is an honest record of what happened.
             if session_provider is not None and final_answer is not None:
-                await asyncio.to_thread(session_provider.record_turn, task, final_answer)
+                await asyncio.to_thread(
+                    session_provider.record_assistant_message, final_answer
+                )
 
             subagents = [
                 item.to_dict() for item in orchestrator.results_for_run(root_run_id)

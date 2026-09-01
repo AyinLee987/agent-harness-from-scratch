@@ -83,9 +83,29 @@ class SessionContextProvider:
     def record_turn(self, user_message: str, assistant_message: str) -> None:
         """Persist one completed turn. Call this after every ``run()``."""
 
+        self.record_user_message(user_message)
+        self.record_assistant_message(assistant_message)
+
+    def record_user_message(self, user_message: str) -> None:
+        """Persist just the user's side of a turn.
+
+        Split out from :meth:`record_turn` so a caller that streams a run
+        (e.g. an SSE endpoint) can persist the question the moment it starts,
+        instead of waiting for a final answer that a disconnect, timeout, or
+        a run that never produces a clean answer (budget exhausted, fatal
+        tool error, cancelled) might mean never arrives. Without this, such a
+        run leaves nothing in the store — not even the question — so the
+        conversation can appear to have vanished on the next reload.
+        """
+
         self.store.append_message(
             self.conversation_id, {"role": "user", "content": user_message}
         )
+
+    def record_assistant_message(self, assistant_message: str) -> None:
+        """Persist just the assistant's side of a turn (pair with
+        :meth:`record_user_message`)."""
+
         self.store.append_message(
             self.conversation_id, {"role": "assistant", "content": assistant_message}
         )
