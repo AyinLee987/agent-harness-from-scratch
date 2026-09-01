@@ -1,0 +1,33 @@
+==============================================================================
+RAG MULTI-HOP: does query decomposition help?  (provider=deepseek)
+Tasks: 5  types: ['parallel', 'sequential']
+==============================================================================
+
+--- BASELINE (no decomposer) ---
+  [parallel  ] parallel_analgesic             answer=ok  search_calls=0
+  [parallel  ] parallel_antipyretic           answer=ok  search_calls=0
+  [parallel  ] parallel_bisphosphonate        answer=ok  search_calls=0
+  [sequential] sequential_htn_elderly         answer=ok  search_calls=0
+  [sequential] sequential_pneumonia_pregnancy answer=ok  search_calls=1
+
+--- TREATMENT (LLMQueryDecomposer wired in) ---
+  [parallel  ] parallel_analgesic             answer=ok  search_calls=0
+  [parallel  ] parallel_antipyretic           answer=ok  search_calls=0
+  [parallel  ] parallel_bisphosphonate        answer=ok  search_calls=0
+  [sequential] sequential_htn_elderly         answer=ok  search_calls=0
+  [sequential] sequential_pneumonia_pregnancy answer=ok  search_calls=1
+
+------------------------------------------------------------------------------
+
+BASELINE:
+  parallel     3/3 correct
+  sequential   2/2 correct
+  overall: 5/5   avg medical_evidence_search calls/task: 0.20
+
+TREATMENT:
+  parallel     3/3 correct
+  sequential   2/2 correct
+  overall: 5/5   avg medical_evidence_search calls/task: 0.20
+==============================================================================
+
+Wrote full results to examples/rag_multihop_results.json

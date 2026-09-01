@@ -95,6 +95,10 @@ class MedicalQuery:
     entities: List[str] = field(default_factory=list)
     filters: RetrievalFilters = field(default_factory=RetrievalFilters)
     subquestions: List[str] = field(default_factory=list)
+    # "single_hop" (default) | "parallel" | "sequential" -- set by a
+    # QueryDecomposer when RAGPipeline is configured with one; otherwise
+    # every query is treated as single_hop, today's plain behavior.
+    mode: str = "single_hop"
 
 
 @dataclass
@@ -146,6 +150,12 @@ class EvidenceBundle:
     conflicts: List[EvidenceConflict] = field(default_factory=list)
     missing_information: List[str] = field(default_factory=list)
     degraded_components: List[str] = field(default_factory=list)
+    # Set only for query.mode == "sequential": tells the model this looks
+    # like a multi-step question the single retrieval below likely doesn't
+    # fully cover, and it should chain medical_evidence_search calls using
+    # what it finds. Empty otherwise -- including for "parallel", which
+    # doesn't need a hint because it was already retrieved per sub-question.
+    decomposition_hint: str = ""
 
     @property
     def sufficient(self) -> bool:

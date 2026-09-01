@@ -831,6 +831,66 @@ medical deployment, replace `HeuristicReranker` with a validated cross-encoder,
 set explicit evidence-age and multi-document policies through `RAGConfig`, and
 ingest reviewed source metadata rather than relying on filenames alone.
 
+### Query decomposition: does it actually help multi-hop questions?
+
+`MedicalQueryPlanner.plan()` computed a `subquestions` field (split on
+punctuation) that nothing downstream ever read — `RAGPipeline.retrieve()`
+always issued exactly one retrieval against the whole question text, no
+matter how compound it was. `agent/rag/decomposition.py::LLMQueryDecomposer`
+replaces that dead field with a real classification call: every question is
+labeled `single_hop` / `parallel` (independent sub-questions bundled
+together, e.g. "is X safe in pregnancy, and what's the adult dose") /
+`sequential` (a later part depends on an earlier retrieval's *result* — true
+multi-hop, e.g. "what's the elderly dose of the first-line drug for
+condition Y" never names the drug). `parallel` gets retrieved and merged
+per sub-question; `sequential` can't be pre-split (the second sub-question's
+content doesn't exist until the first hop runs) so it gets a hint nudging
+the model to chain `medical_evidence_search` calls instead. Off by default:
+
+```dotenv
+ENABLE_RAG_QUERY_DECOMPOSITION=1
+```
+
+**Measured against a real LLM (DeepSeek-chat), it made no difference** —
+`python examples/rag_multihop_eval.py` on a 5-task synthetic corpus (3
+parallel, 2 sequential, plus a dozen distractor documents so retrieval is
+actually selective) scored **5/5 both with and without the decomposer**.
+Digging into why, honestly, rather than declaring victory:
+
+- **Parallel tasks**: the mandatory single-shot injection already retrieved
+  both needed documents every time (both sub-facts share the same drug
+  name, so one query pulls in both), so there was nothing for decomposition
+  to fix. The evidence sets it returned looked more precise in the
+  transcripts (fewer irrelevant citations mixed in) but this wasn't
+  instrumented as a hard metric — a real difference, just not one this eval
+  measured rigorously.
+- **Sequential tasks**: the model already made the necessary follow-up
+  `medical_evidence_search` call on its own in the baseline — `_RULES`'
+  existing "insufficient evidence" instruction was apparently enough of a
+  nudge without an explicit multi-hop hint. Both conditions made exactly
+  one follow-up call on the one task that genuinely needed it
+  (`sequential_pneumonia_pregnancy`) and both got the right answer.
+- **Real cost, no measured benefit**: the decomposer is one extra LLM call
+  per retrieval. In this eval that bought nothing.
+
+One genuine bug this surfaced, unrelated to decomposition: `[E#]` citation
+numbers restart from 1 on *every* `format_evidence_context()` call — the
+mandatory injection's `[E1]` and a later `medical_evidence_search` call's
+own `[E1]` are different pieces of evidence with the same label. A model
+citing across both passes (as the transcripts show it doing) can't be
+unambiguously checked against the right source. Worth fixing separately —
+e.g. a bundle-relative offset — before leaning on multi-pass retrieval in
+a real deployment.
+
+**Takeaway**: this decomposition mechanism is implemented, unit-tested
+(`tests/test_rag_decomposition.py`, fully offline with a scripted decomposer),
+and wired in behind a flag — but on a reasonably capable model against this
+corpus, it's solving a problem the model was already handling on its own.
+It would likely matter more with a weaker model, a corpus where parallel
+sub-facts *don't* share an obvious keyword (so single-shot retrieval
+genuinely can't find both), or if evidence-set precision (not just final-
+answer correctness) were the thing being optimized.
+
 Corpus writes have separate management entry points. For local or batch import:
 
 ```bash

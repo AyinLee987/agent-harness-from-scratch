@@ -65,6 +65,7 @@ from agent import (
     LocalToolConfig,
     BM25Retriever,
     DenseRetriever,
+    LLMQueryDecomposer,
     MedicalParentChildChunker,
     OpenAICompatibleEmbeddingProvider,
     InMemorySessionStore,
@@ -315,10 +316,20 @@ def _start_rag():
                     publisher=os.getenv("RAG_DEFAULT_PUBLISHER", "local-corpus"),
                     jurisdiction=os.getenv("RAG_DEFAULT_JURISDICTION", "CN"),
                 )
+    # Opt-in: classifies each question (single_hop/parallel/sequential) and
+    # retrieves independent sub-questions separately before merging -- see
+    # agent/rag/decomposition.py. Off by default: one extra LLM call per
+    # retrieval, only worth it if your corpus actually has compound/
+    # multi-hop questions to answer.
+    decomposer = LLMQueryDecomposer(_build_llm()) if _enabled("ENABLE_RAG_QUERY_DECOMPOSITION") else None
     RAG_REPOSITORY = repository
-    RAG_PIPELINE = RAGPipeline(repository, bm25, dense)
+    RAG_PIPELINE = RAGPipeline(repository, bm25, dense, decomposer=decomposer)
     RAG_INGESTION = ingestion
-    log_event(logger, logging.INFO, "rag.started", document_count=len(repository.list_documents()))
+    log_event(
+        logger, logging.INFO, "rag.started",
+        document_count=len(repository.list_documents()),
+        query_decomposition_enabled=decomposer is not None,
+    )
 
 
 LEADER_SYSTEM_PROMPT = (
