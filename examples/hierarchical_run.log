@@ -1,0 +1,46 @@
+==============================================================================
+HIERARCHICAL (main + specialist-subagent) ACCURACY  (provider=deepseek)
+Tasks: 21  (same 21 five-step tasks as the flat-registry runs)
+==============================================================================
+  [multi     ] convert_then_round           seq=ok  answer=ok  delegate_calls=5
+  [multi     ] lower_then_vowels            seq=ok  answer=ok  delegate_calls=2
+  [multi     ] add_days_then_weekday        seq=x   answer=ok  delegate_calls=5
+        expected=['date_add_days', 'date_day_of_week', 'text_uppercase', 'text_reverse', 'text_char_count']
+        called  =['date_add_days', 'date_day_of_week', 'text_uppercase', 'text_reverse', 'text_char_count', 'stat_count']
+  [multi     ] celsius_roundtrip            seq=x   answer=ok  delegate_calls=4
+        expected=['convert_celsius_to_fahrenheit', 'convert_fahrenheit_to_celsius', 'convert_celsius_to_fahrenheit', 'convert_fahrenheit_to_celsius', 'math_round']
+        called  =['convert_celsius_to_fahrenheit', 'convert_fahrenheit_to_celsius', 'convert_celsius_to_fahrenheit', 'convert_fahrenheit_to_celsius']
+  [multi     ] add_twice                    seq=x   answer=ok  delegate_calls=4
+        expected=['math_add', 'math_add', 'math_multiply', 'math_round', 'math_divide']
+        called  =['math_add', 'math_add', 'math_multiply', 'math_divide']
+  [multi     ] upper_then_reverse           seq=ok  answer=ok  delegate_calls=3
+  [multi     ] multiply_twice               seq=ok  answer=ok  delegate_calls=1
+  [multi     ] base64_roundtrip             seq=ok  answer=ok  delegate_calls=5
+  [multi     ] add_days_then_days_between   seq=ok  answer=ok  delegate_calls=3
+  [multi     ] kg_to_lb_then_round          seq=ok  answer=ok  delegate_calls=5
+  [multi     ] replace_then_wordcount       seq=x   answer=ok  delegate_calls=2
+        expected=['text_replace', 'text_word_count', 'math_multiply', 'math_add', 'math_round']
+        called  =['text_replace', 'text_word_count', 'math_multiply', 'math_add']
+  [multi     ] average_then_round           seq=x   answer=ok  delegate_calls=3
+        expected=['math_average', 'math_round', 'convert_celsius_to_fahrenheit', 'math_round', 'math_divide']
+        called  =['math_average', 'math_round', 'convert_celsius_to_fahrenheit', 'math_divide']
+  [multi     ] dedupe_then_sort             seq=ok  answer=ok  delegate_calls=5
+  [multi     ] add_days_twice               seq=x   answer=ok  delegate_calls=4
+        expected=['date_add_days', 'date_add_days', 'date_day_of_week', 'calendar_is_weekend', 'calendar_week_number']
+        called  =['date_add_days', 'date_add_days', 'date_day_of_week', 'calendar_week_number']
+  [long_chain] sum_div_round                seq=ok  answer=ok  delegate_calls=5
+  [long_chain] snake_reverse_vowels         seq=x   answer=ok  delegate_calls=4
+        expected=['format_snake_case', 'text_reverse', 'text_count_vowels', 'math_multiply', 'math_round']
+        called  =['format_snake_case', 'text_reverse', 'text_count_vowels', 'math_multiply']
+  [long_chain] add_days_weekday_weekend     seq=ok  answer=ok  delegate_calls=5
+  [long_chain] km_mi_nm_round               seq=ok  answer=ok  delegate_calls=5
+  [long_chain] base64_hex_roundtrip         seq=ok  answer=ok  delegate_calls=5
+  [long_chain] sum_div_round_temp_round     seq=ok  answer=ok  delegate_calls=5
+  [long_chain] lower_snake_reverse_count_leap seq=ok  answer=x   delegate_calls=5
+------------------------------------------------------------------------------
+Exact tool-sequence accuracy: 67% (14/21)
+Final-answer accuracy:        95% (20/21)
+Flat-registry baseline was:   57% exact-sequence / 100% final-answer (both task files)
+==============================================================================
+
+Wrote full results to examples/hierarchical_agent_results.json

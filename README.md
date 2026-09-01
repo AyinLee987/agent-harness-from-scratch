@@ -314,6 +314,67 @@ instruction-following-heavy trajectory once it's confident it already has
 the answer" — and it appears to kick in specifically once chains reach
 ~5 steps, not at 2-4.
 
+### Hierarchical routing: main agent + specialist subagents
+
+The standard mitigation for "too many tools" in production is namespacing:
+give the main agent only a handful of base tools plus one short-description
+"delegate" tool per specialist, and let each specialist run as its own
+`ReActAgent` with its own small, fully-described tool set. `examples/
+hierarchical_agent_kit.py` implements this — main agent sees `fetch`,
+`get_date`, and five one-line `delegate_*` tools (`calculate_agent`,
+`text_agent`, `datetime_agent`, `convert_agent`, `data_agent`, 20 kit tools
+each); its own schema drops from 30,630 to 2,728 chars (11.2x smaller) than
+the flat 100-tool registry. A specialist that can't complete its sub-task
+with what it has must reply `TASK_FAILED: <reason>` instead of guessing.
+
+`examples/hierarchical_agent_test.py` reran the *exact same* 21 five-step
+tasks that scored 57% exact-sequence match flat, through this hierarchy
+instead — flattening every specialist's own tool calls, in delegation
+order, back into one sequence for an apples-to-apples comparison:
+
+```bash
+python examples/hierarchical_agent_test.py
+```
+
+**Exact-sequence accuracy rose to 67% (14/21), up from the flat 57%** — but
+**final-answer accuracy dipped slightly to 95% (20/21)**, and the win came
+with real overhead: 85 delegate calls across 21 tasks (avg 4.05/task,
+vs. the flat trajectory's own 5 tool calls), so roughly 2x the LLM round
+trips for a 10-point gain. Digging into which tasks flipped:
+
+- **5 flat misses got fixed** (`multiply_twice`, `add_days_then_days_between`,
+  `sum_div_round`, `add_days_weekday_weekend`, `sum_div_round_temp_round`) —
+  each specialist call only has to carry a 1-2-step sub-chain, and a
+  shorter, narrower sub-task seems to make the "skip the redundant round"
+  tendency less likely to fire.
+- **4 misses persisted unchanged** (`celsius_roundtrip`, `add_twice`,
+  `replace_then_wordcount`, `add_days_twice`) — same mechanism as the flat
+  run: a specialist still drops a `math_round`/`calendar_is_weekend` call
+  it judges redundant, just now inside its own delegated sub-chain instead
+  of the top-level one.
+- **3 new misses appeared** (`add_days_then_weekday`, `average_then_round`,
+  `snake_reverse_vowels`) — mostly the same redundant-round skip recurring
+  (a stochastic tendency, not new), plus one genuinely new failure mode:
+  `add_days_then_weekday`'s main agent delegated "count the characters"
+  to `text_agent` (`text_char_count`, got 8), then **delegated the same
+  already-answered sub-task again** to `calculate_agent` (`stat_count`,
+  got 8 again) — group boundaries created an ambiguity (which specialist
+  "owns" character counting?) that the flat registry never had to resolve,
+  costing an extra, redundant call.
+- The final-answer dip is the same known **grading-artifact**, not a new
+  defect: `lower_snake_reverse_count_leap`'s main agent correctly says
+  "18 is not a leap year" but the substring check wants the literal token
+  `false` — identical to the flat run's known limitation, see above.
+
+Net read: for *this* kit's regime (100 tools, 5-step chains), hierarchical
+routing is a real, measured win on trajectory-exactness (worth it if you
+actually have hundreds of real tools and want to keep every call's schema
+small) but not a free one — it trades some latency/cost and introduces its
+own new failure surface (redundant cross-specialist delegation) in exchange,
+and doesn't touch final-answer accuracy, which was already ~100% either way.
+One run of 21 tasks is not a large sample — treat 57% vs 67% as a real,
+reproduced-once signal, not a tight confidence interval.
+
 ### Trying the scaling kit live (web UI / API)
 
 The experiments above run standalone (`python examples/tool_scaling_*.py`) —
