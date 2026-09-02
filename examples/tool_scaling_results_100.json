@@ -1,0 +1,447 @@
+{
+  "provider": "deepseek",
+  "probe_task_ids": [
+    "math_modulo",
+    "text_replace",
+    "date_days_between",
+    "convert_kg_to_lb",
+    "data_json_validate",
+    "text_is_palindrome"
+  ],
+  "runs": [
+    {
+      "tool_count": 6,
+      "accuracy": 1.0,
+      "correct": 6,
+      "total": 6,
+      "rows": [
+        {
+          "task_id": "math_modulo",
+          "expect_tool": "math_modulo",
+          "called": [
+            "math_modulo"
+          ],
+          "used_expected_tool": true,
+          "answer": "The remainder when 17 is divided by 5 is **2**.\n\nSince 5 \u00d7 3 = 15, and 17 \u2212 15 = 2, the remainder is 2."
+        },
+        {
+          "task_id": "text_replace",
+          "expect_tool": "text_replace",
+          "called": [
+            "text_replace"
+          ],
+          "used_expected_tool": true,
+          "answer": "The result is: **\"I like dogs\"**"
+        },
+        {
+          "task_id": "date_days_between",
+          "expect_tool": "date_days_between",
+          "called": [
+            "date_days_between"
+          ],
+          "used_expected_tool": true,
+          "answer": "There are **242 days** between 2026-01-01 and 2026-08-31."
+        },
+        {
+          "task_id": "convert_kg_to_lb",
+          "expect_tool": "convert_kg_to_lbs",
+          "called": [
+            "convert_kg_to_lbs"
+          ],
+          "used_expected_tool": true,
+          "answer": "10 kilograms is equal to **22.0462 pounds**."
+        },
+        {
+          "task_id": "data_json_validate",
+          "expect_tool": "data_json_validate",
+          "called": [
+            "data_json_validate"
+          ],
+          "used_expected_tool": true,
+          "answer": "Yes, the text `{\"a\": 1}` is **valid JSON**. The validation tool confirmed it is valid.\n\nIt's a well-formed JSON object containing a single key-value pair: the key `\"a\"` with the numeric value `1`."
+        },
+        {
+          "task_id": "text_is_palindrome",
+          "expect_tool": "text_is_palindrome",
+          "called": [
+            "text_is_palindrome"
+          ],
+          "used_expected_tool": true,
+          "answer": "Yes, the word **'racecar'** is a palindrome! \n\nThe palindrome check returned `true`. This is because 'racecar' reads the same forwards and backwards: **r-a-c-e-c-a-r**."
+        }
+      ]
+    },
+    {
+      "tool_count": 15,
+      "accuracy": 1.0,
+      "correct": 6,
+      "total": 6,
+      "rows": [
+        {
+          "task_id": "math_modulo",
+          "expect_tool": "math_modulo",
+          "called": [
+            "math_modulo"
+          ],
+          "used_expected_tool": true,
+          "answer": "The remainder when 17 is divided by 5 is **2**.\n\nSince 5 \u00d7 3 = 15, and 17 \u2212 15 = 2, the remainder is 2."
+        },
+        {
+          "task_id": "text_replace",
+          "expect_tool": "text_replace",
+          "called": [
+            "text_replace"
+          ],
+          "used_expected_tool": true,
+          "answer": "The result is: **\"I like dogs\"**"
+        },
+        {
+          "task_id": "date_days_between",
+          "expect_tool": "date_days_between",
+          "called": [
+            "date_days_between"
+          ],
+          "used_expected_tool": true,
+          "answer": "There are **242 days** between 2026-01-01 and 2026-08-31."
+        },
+        {
+          "task_id": "convert_kg_to_lb",
+          "expect_tool": "convert_kg_to_lbs",
+          "called": [
+            "convert_kg_to_lbs"
+          ],
+          "used_expected_tool": true,
+          "answer": "10 kilograms is equal to **22.0462 pounds**."
+        },
+        {
+          "task_id": "data_json_validate",
+          "expect_tool": "data_json_validate",
+          "called": [
+            "data_json_validate"
+          ],
+          "used_expected_tool": true,
+          "answer": "Yes, the text `'{\"a\": 1}'` is **valid JSON**. The validation tool confirmed it as valid.\n\nIt's a proper JSON object containing a single key-value pair: the key `\"a\"` with the numeric value `1`."
+        },
+        {
+          "task_id": "text_is_palindrome",
+          "expect_tool": "text_is_palindrome",
+          "called": [
+            "text_is_palindrome"
+          ],
+          "used_expected_tool": true,
+          "answer": "Yes, the word **'racecar'** is a palindrome. It reads the same forwards and backwards: **r-a-c-e-c-a-r**."
+        }
+      ]
+    },
+    {
+      "tool_count": 25,
+      "accuracy": 1.0,
+      "correct": 6,
+      "total": 6,
+      "rows": [
+        {
+          "task_id": "math_modulo",
+          "expect_tool": "math_modulo",
+          "called": [
+            "math_modulo"
+          ],
+          "used_expected_tool": true,
+          "answer": "The remainder when 17 is divided by 5 is **2**.\n\nThis is because 5 goes into 17 three times (5 \u00d7 3 = 15), leaving a remainder of 17 \u2212 15 = 2."
+        },
+        {
+          "task_id": "text_replace",
+          "expect_tool": "text_replace",
+          "called": [
+            "text_replace"
+          ],
+          "used_expected_tool": true,
+          "answer": "The result is **\"I like dogs\"**."
+        },
+        {
+          "task_id": "date_days_between",
+          "expect_tool": "date_days_between",
+          "called": [
+            "date_days_between"
+          ],
+          "used_expected_tool": true,
+          "answer": "There are **242 days** between 2026-01-01 and 2026-08-31."
+        },
+        {
+          "task_id": "convert_kg_to_lb",
+          "expect_tool": "convert_kg_to_lbs",
+          "called": [
+            "convert_kg_to_lbs"
+          ],
+          "used_expected_tool": true,
+          "answer": "10 kilograms is equal to **22.0462 pounds**."
+        },
+        {
+          "task_id": "data_json_validate",
+          "expect_tool": "data_json_validate",
+          "called": [
+            "data_json_validate"
+          ],
+          "used_expected_tool": true,
+          "answer": "Yes, the text `{\"a\": 1}` is valid JSON. The validation tool confirmed it is valid."
+        },
+        {
+          "task_id": "text_is_palindrome",
+          "expect_tool": "text_is_palindrome",
+          "called": [
+            "text_is_palindrome"
+          ],
+          "used_expected_tool": true,
+          "answer": "Yes, the word **'racecar'** is a palindrome. The palindrome check returned `true`.\n\nIt reads the same forwards and backwards: **r-a-c-e-c-a-r** reversed is still **r-a-c-e-c-a-r**."
+        }
+      ]
+    },
+    {
+      "tool_count": 35,
+      "accuracy": 1.0,
+      "correct": 6,
+      "total": 6,
+      "rows": [
+        {
+          "task_id": "math_modulo",
+          "expect_tool": "math_modulo",
+          "called": [
+            "math_modulo"
+          ],
+          "used_expected_tool": true,
+          "answer": "The remainder when 17 is divided by 5 is **2**.\n\nSince 5 \u00d7 3 = 15, and 17 \u2212 15 = 2, the remainder is 2."
+        },
+        {
+          "task_id": "text_replace",
+          "expect_tool": "text_replace",
+          "called": [
+            "text_replace"
+          ],
+          "used_expected_tool": true,
+          "answer": "The result is: **\"I like dogs\"**"
+        },
+        {
+          "task_id": "date_days_between",
+          "expect_tool": "date_days_between",
+          "called": [
+            "date_days_between"
+          ],
+          "used_expected_tool": true,
+          "answer": "There are **242 days** between 2026-01-01 and 2026-08-31."
+        },
+        {
+          "task_id": "convert_kg_to_lb",
+          "expect_tool": "convert_kg_to_lbs",
+          "called": [
+            "convert_kg_to_lbs"
+          ],
+          "used_expected_tool": true,
+          "answer": "10 kilograms is equal to **22.0462 pounds**."
+        },
+        {
+          "task_id": "data_json_validate",
+          "expect_tool": "data_json_validate",
+          "called": [
+            "data_json_validate"
+          ],
+          "used_expected_tool": true,
+          "answer": "Yes, the text `'{\"a\": 1}'` is **valid JSON**. The JSON validator confirmed it is valid. It represents a JSON object with a single key `\"a\"` whose value is the number `1`."
+        },
+        {
+          "task_id": "text_is_palindrome",
+          "expect_tool": "text_is_palindrome",
+          "called": [
+            "text_is_palindrome"
+          ],
+          "used_expected_tool": true,
+          "answer": "Yes, the word **'racecar'** is a palindrome. It reads the same forwards and backwards: **r-a-c-e-c-a-r**."
+        }
+      ]
+    },
+    {
+      "tool_count": 50,
+      "accuracy": 1.0,
+      "correct": 6,
+      "total": 6,
+      "rows": [
+        {
+          "task_id": "math_modulo",
+          "expect_tool": "math_modulo",
+          "called": [
+            "math_modulo"
+          ],
+          "used_expected_tool": true,
+          "answer": "The remainder when 17 is divided by 5 is **2**.\n\n17 \u00f7 5 = 3 with a remainder of 2 (since 5 \u00d7 3 = 15, and 17 \u2212 15 = 2)."
+        },
+        {
+          "task_id": "text_replace",
+          "expect_tool": "text_replace",
+          "called": [
+            "text_replace"
+          ],
+          "used_expected_tool": true,
+          "answer": "The result is: **\"I like dogs\"**"
+        },
+        {
+          "task_id": "date_days_between",
+          "expect_tool": "date_days_between",
+          "called": [
+            "date_days_between"
+          ],
+          "used_expected_tool": true,
+          "answer": "There are **242 days** between 2026-01-01 and 2026-08-31."
+        },
+        {
+          "task_id": "convert_kg_to_lb",
+          "expect_tool": "convert_kg_to_lbs",
+          "called": [
+            "convert_kg_to_lbs"
+          ],
+          "used_expected_tool": true,
+          "answer": "10 kilograms is equal to **22.0462 pounds**."
+        },
+        {
+          "task_id": "data_json_validate",
+          "expect_tool": "data_json_validate",
+          "called": [
+            "data_json_validate"
+          ],
+          "used_expected_tool": true,
+          "answer": "Yes, the text `'{\"a\": 1}'` is **valid JSON**. The JSON validator confirmed it is valid. It represents a JSON object with a single key `\"a\"` whose value is the number `1`."
+        },
+        {
+          "task_id": "text_is_palindrome",
+          "expect_tool": "text_is_palindrome",
+          "called": [
+            "text_is_palindrome"
+          ],
+          "used_expected_tool": true,
+          "answer": "Yes, the word **'racecar'** is a palindrome. It reads the same forwards and backwards: **r-a-c-e-c-a-r**."
+        }
+      ]
+    },
+    {
+      "tool_count": 75,
+      "accuracy": 1.0,
+      "correct": 6,
+      "total": 6,
+      "rows": [
+        {
+          "task_id": "math_modulo",
+          "expect_tool": "math_modulo",
+          "called": [
+            "math_modulo"
+          ],
+          "used_expected_tool": true,
+          "answer": "The remainder when 17 is divided by 5 is **2**.\n\nSince 5 \u00d7 3 = 15, and 17 \u2212 15 = 2, the remainder is 2."
+        },
+        {
+          "task_id": "text_replace",
+          "expect_tool": "text_replace",
+          "called": [
+            "text_replace"
+          ],
+          "used_expected_tool": true,
+          "answer": "The result is: **\"I like dogs\"**"
+        },
+        {
+          "task_id": "date_days_between",
+          "expect_tool": "date_days_between",
+          "called": [
+            "date_days_between"
+          ],
+          "used_expected_tool": true,
+          "answer": "There are **242 days** between 2026-01-01 and 2026-08-31."
+        },
+        {
+          "task_id": "convert_kg_to_lb",
+          "expect_tool": "convert_kg_to_lbs",
+          "called": [
+            "convert_kg_to_lbs"
+          ],
+          "used_expected_tool": true,
+          "answer": "10 kilograms is equal to **22.0462 pounds**."
+        },
+        {
+          "task_id": "data_json_validate",
+          "expect_tool": "data_json_validate",
+          "called": [
+            "data_json_validate"
+          ],
+          "used_expected_tool": true,
+          "answer": "Yes, the text `{\"a\": 1}` is valid JSON. The validation tool confirmed it is valid. It's a well-formed JSON object with a single key `\"a\"` and the numeric value `1`."
+        },
+        {
+          "task_id": "text_is_palindrome",
+          "expect_tool": "text_is_palindrome",
+          "called": [
+            "text_is_palindrome"
+          ],
+          "used_expected_tool": true,
+          "answer": "Yes, the word **'racecar'** is a palindrome. It reads the same forwards and backwards: **r-a-c-e-c-a-r**."
+        }
+      ]
+    },
+    {
+      "tool_count": 100,
+      "accuracy": 1.0,
+      "correct": 6,
+      "total": 6,
+      "rows": [
+        {
+          "task_id": "math_modulo",
+          "expect_tool": "math_modulo",
+          "called": [
+            "math_modulo"
+          ],
+          "used_expected_tool": true,
+          "answer": "The remainder when 17 is divided by 5 is **2**.\n\n(17 \u00f7 5 = 3 with a remainder of 2, since 3 \u00d7 5 = 15 and 17 \u2212 15 = 2.)"
+        },
+        {
+          "task_id": "text_replace",
+          "expect_tool": "text_replace",
+          "called": [
+            "text_replace"
+          ],
+          "used_expected_tool": true,
+          "answer": "The result is: **I like dogs**"
+        },
+        {
+          "task_id": "date_days_between",
+          "expect_tool": "date_days_between",
+          "called": [
+            "date_days_between"
+          ],
+          "used_expected_tool": true,
+          "answer": "There are **242 days** between 2026-01-01 and 2026-08-31."
+        },
+        {
+          "task_id": "convert_kg_to_lb",
+          "expect_tool": "convert_kg_to_lbs",
+          "called": [
+            "convert_kg_to_lbs"
+          ],
+          "used_expected_tool": true,
+          "answer": "10 kilograms is equal to **22.0462 pounds**."
+        },
+        {
+          "task_id": "data_json_validate",
+          "expect_tool": "data_json_validate",
+          "called": [
+            "data_json_validate"
+          ],
+          "used_expected_tool": true,
+          "answer": "Yes, the text `{\"a\": 1}` is valid JSON. The validation tool confirmed it is valid."
+        },
+        {
+          "task_id": "text_is_palindrome",
+          "expect_tool": "text_is_palindrome",
+          "called": [
+            "text_is_palindrome"
+          ],
+          "used_expected_tool": true,
+          "answer": "Yes, the word **'racecar'** is a palindrome. It reads the same forwards and backwards: **r-a-c-e-c-a-r**."
+        }
+      ]
+    }
+  ]
+}

@@ -130,12 +130,14 @@ trigger** — T1 78%, T5 73%, T4 62%, T3 32%, T2 18%, across 46 distinct tools.
 
 ### 2.5 Conditions
 
-| Condition | Registry | System prompt |
-|---|---|---|
-| `baseline` | flat, 100 tools | shipped `DEFAULT_SYSTEM_PROMPT`, verbatim |
-| `instruction` | flat, 100 tools | early-stop clause removed, explicit completeness rule added |
-| `fewshot` | flat, 100 tools | `instruction` + two worked examples executing a redundant step |
-| `hierarchical` | main agent + 5 specialists | `MAIN_SYSTEM_PROMPT` (unchanged) |
+| Condition | Registry | Main prompt | Specialist prompt |
+|---|---|---|---|
+| `baseline` | flat, 100 tools | shipped `DEFAULT_SYSTEM_PROMPT` | — |
+| `instruction` | flat, 100 tools | early-stop clause removed, completeness rule added | — |
+| `fewshot` | flat, 100 tools | `instruction` + two worked examples | — |
+| `hierarchical_bare` | main + 5 specialists | `MAIN_SYSTEM_PROMPT` | completeness sentence **removed** |
+| `hierarchical` | main + 5 specialists | `MAIN_SYSTEM_PROMPT` | shipped `SUBAGENT_SYSTEM_PROMPT` |
+| `hierarchical_fewshot` | main + 5 specialists | `MAIN_SYSTEM_PROMPT` | shipped + a worked example |
 
 `instruction` changes exactly one thing relative to `baseline` — everything
 before the completeness rule is byte-identical. The few-shot examples use tools
@@ -143,9 +145,50 @@ that appear in **no** Test-A task (a divide/round chain, a metres↔feet round
 trip) so they demonstrate the *behaviour* rather than the test items; they do
 still exhibit the T1 and T5 *patterns*, which is noted as a threat in §6.
 
-For `hierarchical`, each specialist's own tool calls are flattened in
-delegation order and compared against `expect_tool_sequence` — the identical
+For the hierarchical conditions, each specialist's own tool calls are flattened
+in delegation order and compared against `expect_tool_sequence` — the identical
 metric the flat conditions use, so the comparison stays apples-to-apples.
+
+### 2.6 Localising the skip before intervening — and a confound it exposed
+
+Before adding any prompt to the hierarchical arm it was necessary to know
+*which layer* drops the step: does the main agent fail to delegate a sub-task,
+or does a correctly-delegated specialist not execute it? The runner records the
+full `call_log` (group, delegated sub-task text, tools actually called), so a
+missing required tool can be attributed: if its group was never delegated to,
+the main agent under-delegated; if the group *was* delegated, the specialist
+dropped it.
+
+On a 15-task diagnostic, **4 of 4 missing tools were dropped inside a
+correctly-delegated specialist. The main agent under-delegated zero times.**
+So the specialist prompt, not `MAIN_SYSTEM_PROMPT`, is the layer any prompt
+intervention has to target — and worked examples naming concrete tools cannot
+go in the main prompt at all, since the main agent only holds five
+`delegate_*` tools and would be shown examples of tools it does not have.
+
+That diagnostic also surfaced a **confound in the original hierarchical
+result**: the shipped `SUBAGENT_SYSTEM_PROMPT` already contains a completeness
+instruction —
+
+> "call every tool call the task actually requires, even one whose result looks
+> like it wouldn't change (e.g. rounding a number that is already at the target
+> precision); do not skip a step just because you are confident you already
+> know the answer."
+
+The `hierarchical` arm was therefore never a pure architectural intervention.
+It carried an anti-skipping rule at exactly the layer where skipping happens,
+and no previous measurement separated the two. `hierarchical_bare` removes that
+sentence and changes nothing else, which is what makes §4.6 possible.
+
+The specialist few-shot example is written **tool-agnostically** ("take 5,
+round it to 2 decimal places, then multiply by 3") because each specialist
+holds a different 20-tool slice; naming `math_round` would show `text_agent` a
+tool it does not have.
+
+Enabling this required a small, backwards-compatible change to the kit:
+`DelegateTool` and `build_main_registry` gained a `subagent_system_prompt`
+parameter that defaults to the shipped prompt, so every existing caller is
+unaffected.
 
 ### 2.6 Metrics
 
@@ -187,28 +230,34 @@ reimplemented.
 
 | Condition | Mean | 95% CI | Δ vs baseline | p |
 |---|---|---|---|---|
-| baseline | 0.389 | [0.283, 0.494] | — | — |
+| baseline | 0.389 | [0.278, 0.506] | — | — |
 | instruction | 0.383 | [0.283, 0.483] | −0.006 | 0.856 |
 | **fewshot** | **0.567** | [0.450, 0.678] | **+0.178** | **0.0066** ✱ |
+| hierarchical_bare | 0.333 | [0.239, 0.433] | −0.056 | 0.352 |
 | hierarchical | 0.439 | [0.333, 0.550] | +0.050 | 0.520 |
+| hierarchical_fewshot | 0.411 | [0.311, 0.511] | +0.022 | 0.781 |
 
-### Step recall — every intervention fixes skipping
+### Step recall — every intervention that *says something* fixes skipping
 
 | Condition | Mean | 95% CI | Δ | p |
 |---|---|---|---|---|
 | baseline | 0.838 | [0.780, 0.893] | — | — |
 | instruction | 0.972 | [0.955, 0.987] | +0.134 | <0.0001 ✱ |
 | fewshot | 0.974 | [0.956, 0.989] | +0.136 | <0.0001 ✱ |
+| **hierarchical_bare** | **0.867** | [0.817, 0.912] | **+0.029** | **0.227** |
 | hierarchical | 0.949 | [0.926, 0.968] | +0.110 | <0.0001 ✱ |
+| hierarchical_fewshot | 0.943 | [0.920, 0.963] | +0.105 | <0.0001 ✱ |
 
-### Final-answer accuracy — two interventions actively damage it
+### Final-answer accuracy — the two flat prompt arms actively damage it
 
 | Condition | Mean | 95% CI | Δ | p |
 |---|---|---|---|---|
 | baseline | 0.789 | [0.711, 0.861] | — | — |
 | instruction | 0.494 | [0.394, 0.594] | **−0.294** | <0.0001 ✱ |
 | fewshot | 0.656 | [0.550, 0.756] | **−0.133** | 0.024 ✱ |
+| hierarchical_bare | 0.728 | [0.628, 0.822] | −0.061 | 0.366 |
 | hierarchical | 0.806 | [0.717, 0.889] | +0.017 | 0.750 |
+| hierarchical_fewshot | 0.778 | [0.689, 0.861] | −0.011 | 0.876 |
 
 ### Failure composition (runs)
 
@@ -217,17 +266,19 @@ reimplemented.
 | baseline | 70 | 55 | 26 | 29 | 185 |
 | instruction | 69 | **6** | **81** | 24 | 393 |
 | fewshot | 102 | 9 | 48 | 21 | 217 |
+| hierarchical_bare | 60 | **52** | 32 | 36 | 346 |
 | hierarchical | 79 | 20 | 45 | 36 | 427 |
+| hierarchical_fewshot | 74 | 22 | 45 | 39 | 467 |
 
 ### By trigger class (exact match)
 
-| Trigger | n | baseline | instruction | fewshot | hierarchical |
-|---|---|---|---|---|---|
-| T1 no-op round | 141 | 32.6% | 29.1% | **49.6%** | 43.3% |
-| T2 inferable bool | 33 | 63.6% | **78.8%** | **78.8%** | 51.5% |
-| T3 small stat | 57 | 21.1% | 14.0% | **38.6%** | 35.1% |
-| T4 same tool twice | 111 | 25.2% | 25.2% | **56.8%** | 45.9% |
-| T5 identity round trip | 132 | 41.7% | 40.9% | **62.1%** | 48.5% |
+| Trigger | n | baseline | instruction | fewshot | hier_bare | hierarchical | hier_fewshot |
+|---|---|---|---|---|---|---|---|
+| T1 no-op round | 141 | 32.6% | 29.1% | **49.6%** | 30.5% | 43.3% | 41.1% |
+| T2 inferable bool | 33 | 63.6% | **78.8%** | **78.8%** | 48.5% | 51.5% | 57.6% |
+| T3 small stat | 57 | 21.1% | 14.0% | **38.6%** | 31.6% | 35.1% | 29.8% |
+| T4 same tool twice | 111 | 25.2% | 25.2% | **56.8%** | 30.6% | 45.9% | 39.6% |
+| T5 identity round trip | 132 | 41.7% | 40.9% | **62.1%** | 36.4% | 48.5% | 44.7% |
 
 ### Cost
 
@@ -236,7 +287,9 @@ reimplemented.
 | baseline | 8.5 | 0 |
 | instruction | 10.6 | 0 |
 | fewshot | 9.7 | 0 |
+| hierarchical_bare | 7.8 | **7.03** |
 | hierarchical | 7.7 | **6.87** |
+| hierarchical_fewshot | 7.5 | **6.72** |
 
 ---
 
@@ -277,10 +330,52 @@ At 8 steps, hierarchical routing scores 43.9% against a 38.9% baseline:
 **+5.0pp, p=0.52**. On 60 tasks with k=3 — a design with far more power than
 the original 21×1 — the improvement is not distinguishable from noise.
 
-It is not worthless: it is the only condition that significantly improves step
-recall (+0.110) **without** damaging final-answer accuracy (+1.7pp, p=0.75).
+It is not worthless: it improves step recall (+0.110, p<0.0001) **without**
+damaging final-answer accuracy (+1.7pp, p=0.75) — the only arm that does both.
 But it costs 6.87 delegations per run, each a full subagent invocation, and it
 is beaten on exact match by a paragraph of prompt text that costs nothing.
+§4.6 goes further: the recall gain is not the routing's at all.
+
+### 4.6 The routing contributes nothing; its prompt does all the work
+
+`hierarchical_bare` is `hierarchical` with one sentence deleted from the
+specialist prompt and nothing else changed. It scores:
+
+| | exact match | step recall | answer accuracy |
+|---|---|---|---|
+| flat baseline | 0.389 | 0.838 | 0.789 |
+| **hierarchical_bare** | **0.333** (p=0.35) | **0.867** (p=0.227) | 0.728 (p=0.37) |
+| hierarchical | 0.439 | 0.949 | 0.806 |
+
+Stripped of that sentence, routing does **not** significantly reduce skipping
+(+0.029, p=0.227, against +0.110 for the same architecture with the sentence),
+its `skip` failures jump back from 20 to 52 — essentially the flat baseline's
+55 — and its exact match falls *below* doing nothing at all.
+
+So the entire measured benefit of the hierarchical architecture came from a
+single anti-skipping instruction that happened to be embedded in
+`SUBAGENT_SYSTEM_PROMPT`, not from shrinking the main agent's tool surface from
+100 tools to 5. The architecture on its own buys 7 delegations per run and no
+measurable accuracy.
+
+This is the strongest result here, and it was only findable because §2.6 asked
+which layer the skip happens in before trying to fix it.
+
+### 4.7 Routing and demonstrations do not stack
+
+`hierarchical_fewshot` — the worked example added to the specialist prompt,
+which §2.6 established is the layer that drops steps — scores **0.411
+(+0.022, p=0.78)**, statistically indistinguishable from both `hierarchical`
+(0.439) and the baseline. Its step recall (0.943) is if anything a hair below
+plain `hierarchical` (0.949).
+
+The reason is visible in the failure composition: under hierarchical routing,
+skipping is already handled (20–22 `skip` failures out of 180), and what
+remains is `other` (36–39) and `extra` (45) — errors introduced by the
+delegation layer itself, including runs that delegate 20 times to complete an
+8-step chain. A specialist-level prompt cannot fix a coordination failure. The
+same demonstration that is worth +17.8pp in the flat setting is worth nothing
+here, because it addresses a bottleneck that routing has already moved.
 
 ### 4.4 Exact-sequence match alone would have misled us
 
@@ -311,12 +406,16 @@ everything that is not a clean skip.
 1. **The target moved.** The number to beat is no longer 57%; it is `fewshot`
    at 56.7% exact match, and the constraint is answer accuracy ≥ 78.9%. No
    intervention tested achieves both.
-2. **The real problem is now well posed.** Every intervention can stop the
-   skipping — that part is easy and three different methods do it. None can
-   stop it *without* inducing unrequested calls or degrading answers. What is
-   needed is something that judges whether a specific step is required at a
-   specific point, which is exactly what a static rule cannot express and a
-   learned gate could.
+2. **The real problem is now well posed.** Every intervention that *states a
+   rule* stops the skipping — that part is easy, and three different phrasings
+   do it. None stops it *without* inducing unrequested calls or degrading
+   answers. What is needed is something that judges whether a specific step is
+   required at a specific point, which is exactly what a static rule cannot
+   express and a learned gate could.
+5. **Architecture was not the lever.** The one architectural intervention in
+   the ladder contributes nothing once its prompt is controlled for (4.6).
+   Any future comparison against "the hierarchical baseline" has to specify
+   which specialist prompt it means.
 3. **Over-correction is not a hypothetical training risk.** `PLAN.md` §8 lists
    it as the largest risk of the training arm. It appeared first, and severely,
    in the *prompt* arm. Test-C is required for every rung of the ladder.
@@ -339,9 +438,12 @@ everything that is not a clean skip.
 - **Generated tasks are synthetic and occasionally absurd** ("base64-encode it,
   decode it, encode it, decode it"). That is the redundancy pressure being
   tested, but it is not natural user traffic.
-- **`hierarchical_instruction` was not run.** Whether routing and the
-  completeness rule stack, or fix the same thing, is open. The condition is
-  implemented and one command away.
+- **The `hierarchical_bare` ablation removes one sentence, not the concept.**
+  It shows the shipped prompt carries the benefit; it does not prove no
+  specialist prompt could make routing pay off.
+- **The delegation layer was not itself tuned.** `MAIN_SYSTEM_PROMPT` was held
+  fixed across all three hierarchical arms, so the `other`/`extra` failures
+  4.7 attributes to coordination were never targeted by any intervention.
 - **The 5-step numbers in §4.2 and §4.5 come from k=1 runs** on 21 tasks and
   should be treated as indicative only. That is the point of §2.2.
 

@@ -69,7 +69,9 @@ from agent import ReActAgent, ToolRegistry  # noqa: E402
 from agent.trigger.react_loop import DEFAULT_SYSTEM_PROMPT  # noqa: E402
 
 from tool_scaling_kit import ALL_TOOLS  # noqa: E402
-from hierarchical_agent_kit import MAIN_SYSTEM_PROMPT, build_main_registry  # noqa: E402
+from hierarchical_agent_kit import (  # noqa: E402
+    MAIN_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT, build_main_registry,
+)
 
 TASK_FILES = (
     os.path.join(_HERE, "tool_scaling_multi_tasks.json"),
@@ -127,22 +129,64 @@ then convert_feet_to_meters(32.808) -> 10.0 even though this returns to the
 starting value, then math_add(10.0, 5) -> 15.0. The round trip is NOT
 collapsed just because the answer is predictable."""
 
+# --- specialist prompts, for the hierarchical conditions -------------------
+#
+# A 15-task diagnostic (see INTERVENTION_LADDER_RESULTS.md) localised every
+# skipped step in the hierarchical arm: in 4/4 cases the tool's group HAD been
+# delegated to and the specialist simply did not call it. The main agent never
+# under-delegated. So the specialist prompt, not MAIN_SYSTEM_PROMPT, is the
+# layer any prompt intervention has to target here.
+#
+# That diagnostic also exposed a confound: the shipped SUBAGENT_SYSTEM_PROMPT
+# ALREADY contains a completeness instruction ("call every tool call the task
+# actually requires, even one whose result looks like it wouldn't change").
+# The `hierarchical` arm was therefore never a pure architectural
+# intervention. `hierarchical_bare` strips that sentence to separate routing
+# from the prompt the kit happens to ship with.
+
+SUBAGENT_BARE = (
+    "You are {group_name}, a specialist agent. Reason step by step and use "
+    "the provided tools to complete the delegated sub-task precisely. "
+    "If, and only if, none of your available tools can complete the sub-task, "
+    "respond with exactly: TASK_FAILED: <short reason>. Otherwise respond "
+    "with a final answer and do not call any more tools."
+)
+
+# Tool-agnostic on purpose: each specialist holds a different 20-tool slice,
+# so an example naming math_round would reference a tool text_agent lacks.
+SUBAGENT_FEWSHOT = SUBAGENT_SYSTEM_PROMPT + (
+    "\n\nWorked example of carrying out every step. Sub-task: \"take 5, round "
+    "it to 2 decimal places, then multiply by 3\". Correct behaviour is three "
+    "tool calls: round 5 to 2 decimals (which returns 5, unchanged), then "
+    "multiply by 3. NOT two calls that skip the rounding because it changes "
+    "nothing. Equally, a conversion that returns to its starting unit, or the "
+    "same operation applied twice, is still executed once per request. A step "
+    "whose result you can predict still has to be executed as a tool call -- "
+    "and equally, do not add calls the sub-task did not ask for."
+)
+
 CONDITIONS = {
     "baseline": DEFAULT_SYSTEM_PROMPT,
     "instruction": INSTRUCTION_PROMPT,
     "fewshot": INSTRUCTION_PROMPT + FEWSHOT_BLOCK,
-    # Rung 3: don't tell the model anything, shrink what it has to look at.
-    # The main agent sees 5 delegate_* tools (2,728 chars of schema) instead
-    # of 100 tools (30,630), and each specialist sees only its own category.
+    # Rung 3: don't tell the model anything new, shrink what it has to look
+    # at. The main agent sees 5 delegate_* tools (2,728 chars of schema)
+    # instead of 100 tools (30,630); each specialist sees only its category.
     "hierarchical": MAIN_SYSTEM_PROMPT,
-    # Rung 3+1: do the routing AND state the completeness rule, to see whether
-    # the two interventions stack or are fixing the same thing.
-    "hierarchical_instruction": MAIN_SYSTEM_PROMPT + "\n\n" + COMPLETENESS_RULE,
+    "hierarchical_bare": MAIN_SYSTEM_PROMPT,
+    "hierarchical_fewshot": MAIN_SYSTEM_PROMPT,
+}
+
+# Per-condition specialist prompt; None means the kit's shipped default.
+SUBAGENT_PROMPTS = {
+    "hierarchical": None,
+    "hierarchical_bare": SUBAGENT_BARE,
+    "hierarchical_fewshot": SUBAGENT_FEWSHOT,
 }
 
 # Conditions that run through the main-agent + specialist-subagent kit rather
 # than a flat 100-tool registry.
-HIERARCHICAL = {"hierarchical", "hierarchical_instruction"}
+HIERARCHICAL = set(SUBAGENT_PROMPTS)
 
 
 # --------------------------------------------------------------------------
@@ -268,7 +312,7 @@ _PRINT_LOCK = threading.Lock()
 
 def _one_run(task: dict, trial: int, system_prompt: str, provider: str,
              max_steps: int, delay: float, hierarchical: bool = False,
-             sub_max_steps: int = 8) -> dict:
+             sub_max_steps: int = 8, subagent_prompt: str | None = None) -> dict:
     expected = task["expect_tool_sequence"]
     # Fresh LLM, agent and registry per run: nothing is shared across threads
     # except the pure tool functions themselves.
@@ -279,6 +323,7 @@ def _one_run(task: dict, trial: int, system_prompt: str, provider: str,
                 llm_factory=lambda: _make_llm(provider),
                 call_log=call_log,
                 max_steps=sub_max_steps,
+                subagent_system_prompt=subagent_prompt,
             )
         else:
             registry = ToolRegistry(ALL_TOOLS)
@@ -328,6 +373,14 @@ def _one_run(task: dict, trial: int, system_prompt: str, provider: str,
         "task_id": task["id"], "trial": trial,
         "triggers": task["_triggers"],
         "delegate_calls": len(call_log),
+        # Kept for hierarchical runs so a missing required call can be
+        # localised: a tool whose group was never delegated to means the main
+        # agent under-delegated; a tool whose group *was* delegated but that
+        # never got called means the specialist dropped it.
+        "call_log": [
+            {"group": e["group"], "task": e["task"], "called_tools": e["called_tools"]}
+            for e in call_log
+        ] if hierarchical else None,
         "expect_tool_sequence": expected,
         "called_sequence": called,
         "exact_sequence_match": exact,
@@ -354,10 +407,11 @@ def run_condition(
     rows: list[dict] = []
     started = time.time()
     is_hier = name in HIERARCHICAL
+    sub_prompt = SUBAGENT_PROMPTS.get(name)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [
             pool.submit(_one_run, t, k, system_prompt, provider, max_steps,
-                        delay, is_hier)
+                        delay, is_hier, 8, sub_prompt)
             for t, k in jobs
         ]
         for fut in as_completed(futures):

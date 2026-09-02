@@ -1,0 +1,325 @@
+{
+  "provider": "deepseek",
+  "registry_size": 100,
+  "total": 14,
+  "exact_sequence_matches": 8,
+  "sequence_accuracy": 0.5714285714285714,
+  "answer_accuracy": 1.0,
+  "rows": [
+    {
+      "task_id": "convert_then_round",
+      "prompt": "Convert 10 kilometers to miles, round the result to 2 decimal places, convert that number of miles to nautical miles, round to 1 decimal place, then add 1.",
+      "expect_tool_sequence": [
+        "convert_km_to_miles",
+        "math_round",
+        "measure_miles_to_nautical_miles",
+        "math_round",
+        "math_add"
+      ],
+      "called_sequence": [
+        "convert_km_to_miles",
+        "math_round",
+        "measure_miles_to_nautical_miles",
+        "math_round",
+        "math_add"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "The final result is **6.4**.\n\nHere's the full breakdown:\n1. 10 km \u2192 6.21371 miles\n2. Rounded to 2 decimal places \u2192 **6.21 miles**\n3. 6.21 miles \u2192 5.396341 nautical miles\n4. Rounded to 1 decimal place \u2192 **5.4 nautical miles**\n5. 5.4 + 1 = **6.4**",
+      "steps": 6,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "lower_then_vowels",
+      "prompt": "Convert 'Hello World' to lowercase, count the vowels in the result, add 10 to that count, multiply by 2, then round to the nearest whole number.",
+      "expect_tool_sequence": [
+        "text_lowercase",
+        "text_count_vowels",
+        "math_add",
+        "math_multiply",
+        "math_round"
+      ],
+      "called_sequence": [
+        "text_lowercase",
+        "text_count_vowels",
+        "math_add",
+        "math_multiply",
+        "math_round"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "The final result is **26**.\n\nHere's the step-by-step breakdown:\n1. **'Hello World' \u2192 lowercase** = \"hello world\"\n2. **Count vowels** in \"hello world\" = 3 (e, o, o, and... let me verify: h-e-l-l-o w-o-r-l-d \u2192 vowels are e, o, o = 3)\n3. **Add 10**: 3 + 10 = 13\n4. **Multiply by 2**: 13 \u00d7 2 = 26\n5. **Round to nearest whole number**: 26 (already whole)\n\n**Final answer: 26**",
+      "steps": 6,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "add_days_then_weekday",
+      "prompt": "Add 10 days to 2026-08-31, find what day of the week the new date falls on, convert that weekday name to uppercase, reverse it, then count how many characters it has.",
+      "expect_tool_sequence": [
+        "date_add_days",
+        "date_day_of_week",
+        "text_uppercase",
+        "text_reverse",
+        "text_char_count"
+      ],
+      "called_sequence": [
+        "date_add_days",
+        "date_day_of_week",
+        "text_uppercase",
+        "text_reverse",
+        "text_char_count"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "Let me summarize the full chain of results:\n\n1. **Add 10 days** to 2026-08-31 \u2192 **2026-09-10**\n2. **Day of the week** for 2026-09-10 \u2192 **Thursday**\n3. **Uppercase** \u2192 **THURSDAY**\n4. **Reversed** \u2192 **YADSRUHT**\n5. **Character count** \u2192 **8**\n\nThe final answer is **8 characters**.",
+      "steps": 6,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "celsius_roundtrip",
+      "prompt": "Convert 100 degrees Celsius to Fahrenheit, then back to Celsius, then to Fahrenheit again, then back to Celsius again, then round the final result to the nearest whole number.",
+      "expect_tool_sequence": [
+        "convert_celsius_to_fahrenheit",
+        "convert_fahrenheit_to_celsius",
+        "convert_celsius_to_fahrenheit",
+        "convert_fahrenheit_to_celsius",
+        "math_round"
+      ],
+      "called_sequence": [
+        "convert_celsius_to_fahrenheit",
+        "convert_fahrenheit_to_celsius",
+        "convert_celsius_to_fahrenheit",
+        "convert_fahrenheit_to_celsius"
+      ],
+      "exact_sequence_match": false,
+      "answer_ok": true,
+      "answer": "(stopped) Last observation: 100",
+      "steps": 4,
+      "stop_reason": "loop_detected: oscillating 'convert_celsius_to_fahrenheit' <-> 'convert_fahrenheit_to_celsius'"
+    },
+    {
+      "task_id": "add_twice",
+      "prompt": "What is 12 plus 8? Add 15 to that result. Multiply by 2. Round to the nearest whole number. Then divide by 7.",
+      "expect_tool_sequence": [
+        "math_add",
+        "math_add",
+        "math_multiply",
+        "math_round",
+        "math_divide"
+      ],
+      "called_sequence": [
+        "math_add",
+        "math_add",
+        "math_multiply",
+        "math_divide"
+      ],
+      "exact_sequence_match": false,
+      "answer_ok": true,
+      "answer": "Let me walk through the full calculation:\n\n1. **12 + 8** = 20\n2. **20 + 15** = 35\n3. **35 \u00d7 2** = 70\n4. **Round to nearest whole number** = 70 (already whole)\n5. **70 \u00f7 7** = 10\n\n**Final answer: 10**",
+      "steps": 5,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "upper_then_reverse",
+      "prompt": "Convert 'agent' to uppercase, reverse it, count its characters, add 3 to that count, then round to the nearest whole number.",
+      "expect_tool_sequence": [
+        "text_uppercase",
+        "text_reverse",
+        "text_char_count",
+        "math_add",
+        "math_round"
+      ],
+      "called_sequence": [
+        "text_uppercase",
+        "text_reverse",
+        "text_char_count",
+        "math_add",
+        "math_round"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "Here's the step-by-step result:\n\n1. **Uppercase** 'agent' \u2192 **AGENT**\n2. **Reverse** 'AGENT' \u2192 **TNEGA**\n3. **Count characters** of 'TNEGA' \u2192 **5**\n4. **Add 3** \u2192 5 + 3 = **8**\n5. **Round** to nearest whole number \u2192 **8**\n\n**Final answer: 8**",
+      "steps": 6,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "multiply_twice",
+      "prompt": "Multiply 3 by 4, then multiply that by 5, then add 10, then subtract 20, then round to the nearest whole number.",
+      "expect_tool_sequence": [
+        "math_multiply",
+        "math_multiply",
+        "math_add",
+        "math_subtract",
+        "math_round"
+      ],
+      "called_sequence": [
+        "math_multiply",
+        "math_multiply",
+        "math_add",
+        "math_subtract"
+      ],
+      "exact_sequence_match": false,
+      "answer_ok": true,
+      "answer": "Now round to the nearest whole number. 50 is already a whole number, so it stays 50.\n\nThe final result is **50**.\n\nLet me walk through the steps:\n1. 3 \u00d7 4 = 12\n2. 12 \u00d7 5 = 60\n3. 60 + 10 = 70\n4. 70 \u2212 20 = 50\n5. Rounded to nearest whole number: **50**",
+      "steps": 5,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "base64_roundtrip",
+      "prompt": "Base64-encode the word 'chain'. Hex-encode that Base64 string. Hex-decode it back to the Base64 string. Base64-decode that back to the original word. Then reverse the result.",
+      "expect_tool_sequence": [
+        "data_base64_encode",
+        "encode_hex_encode",
+        "encode_hex_decode",
+        "data_base64_decode",
+        "text_reverse"
+      ],
+      "called_sequence": [
+        "data_base64_encode",
+        "encode_hex_encode",
+        "encode_hex_decode",
+        "data_base64_decode",
+        "text_reverse"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "Here's the full chain of transformations:\n\n1. **Base64-encode** 'chain' \u2192 `Y2hhaW4=`\n2. **Hex-encode** `Y2hhaW4=` \u2192 `593268686157343d`\n3. **Hex-decode** `593268686157343d` \u2192 `Y2hhaW4=`\n4. **Base64-decode** `Y2hhaW4=` \u2192 `chain`\n5. **Reverse** `chain` \u2192 **`niahc`**\n\nThe final result is **`niahc`**.",
+      "steps": 6,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "add_days_then_days_between",
+      "prompt": "Take 2026-01-01 and add 100 days. Tell me how many days are between that new date and 2026-12-31. Divide that number by 2. Round to 1 decimal place. Then add 8.",
+      "expect_tool_sequence": [
+        "date_add_days",
+        "date_days_between",
+        "math_divide",
+        "math_round",
+        "math_add"
+      ],
+      "called_sequence": [
+        "date_add_days",
+        "date_days_between",
+        "math_divide",
+        "math_add"
+      ],
+      "exact_sequence_match": false,
+      "answer_ok": true,
+      "answer": "The final result is **140**.\n\nHere's the full breakdown:\n1. 2026-01-01 + 100 days = **2026-04-11**\n2. Days between 2026-04-11 and 2026-12-31 = **264**\n3. 264 \u00f7 2 = **132**\n4. Rounded to 1 decimal place = **132.0**\n5. 132 + 8 = **140**",
+      "steps": 5,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "kg_to_lb_then_round",
+      "prompt": "Convert 7 kilograms to pounds, round to the nearest whole number, convert that back to kilograms, round to 1 decimal place, then multiply by 2.",
+      "expect_tool_sequence": [
+        "convert_kg_to_lbs",
+        "math_round",
+        "convert_lbs_to_kg",
+        "math_round",
+        "math_multiply"
+      ],
+      "called_sequence": [
+        "convert_kg_to_lbs",
+        "math_round",
+        "convert_lbs_to_kg",
+        "math_round",
+        "math_multiply"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "The final result is **13.6**.\n\nHere's the step-by-step breakdown:\n1. **7 kg \u2192 lbs:** 15.43234 lbs\n2. **Round to nearest whole:** 15 lbs\n3. **15 lbs \u2192 kg:** 6.80388 kg\n4. **Round to 1 decimal:** 6.8 kg\n5. **Multiply by 2:** **13.6**",
+      "steps": 6,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "replace_then_wordcount",
+      "prompt": "In 'I love cats and cats love me', replace 'cats' with 'dogs', count the words in the result, multiply that count by 3, add 1, then round to the nearest whole number.",
+      "expect_tool_sequence": [
+        "text_replace",
+        "text_word_count",
+        "math_multiply",
+        "math_add",
+        "math_round"
+      ],
+      "called_sequence": [
+        "text_replace",
+        "text_word_count",
+        "math_multiply",
+        "math_add"
+      ],
+      "exact_sequence_match": false,
+      "answer_ok": true,
+      "answer": "21 + 1 = 22.\n\n**Step 5:** Round to the nearest whole number. 22 is already a whole number, so it stays 22.\n\nThe final answer is **22**.\n\nLet me summarize the steps:\n1. Replace 'cats' with 'dogs': \"I love dogs and dogs love me\"\n2. Word count: 7\n3. 7 \u00d7 3 = 21\n4. 21 + 1 = 22\n5. Rounded to nearest whole number: **22**",
+      "steps": 5,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "average_then_round",
+      "prompt": "Compute the average of 2, 3, 5, and 7. Round to 1 decimal place. Convert that number from Celsius to Fahrenheit. Round to the nearest whole number. Then divide by 5.",
+      "expect_tool_sequence": [
+        "math_average",
+        "math_round",
+        "convert_celsius_to_fahrenheit",
+        "math_round",
+        "math_divide"
+      ],
+      "called_sequence": [
+        "math_average",
+        "math_round",
+        "convert_celsius_to_fahrenheit",
+        "math_round",
+        "math_divide"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "The final result is **8**.\n\nHere's the full breakdown:\n1. Average of 2, 3, 5, 7 = **4.25**\n2. Rounded to 1 decimal place = **4.2**\n3. 4.2\u00b0C converted to Fahrenheit = **39.56\u00b0F**\n4. Rounded to nearest whole number = **40**\n5. 40 \u00f7 5 = **8**",
+      "steps": 6,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "dedupe_then_sort",
+      "prompt": "Remove duplicates from 'b,a,c,a,b', keeping order. Sort what's left alphabetically ascending. Then sort that result alphabetically descending. Convert the result to uppercase. Then reverse it.",
+      "expect_tool_sequence": [
+        "data_dedupe_list",
+        "data_sort_list",
+        "data_sort_list",
+        "text_uppercase",
+        "text_reverse"
+      ],
+      "called_sequence": [
+        "data_dedupe_list",
+        "data_sort_list",
+        "data_sort_list",
+        "text_uppercase",
+        "text_reverse"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "The final result is **A,B,C**.\n\nHere's the step-by-step breakdown:\n1. **Remove duplicates** from `b,a,c,a,b` \u2192 `b,a,c`\n2. **Sort ascending** \u2192 `a,b,c`\n3. **Sort descending** \u2192 `c,b,a`\n4. **Uppercase** \u2192 `C,B,A`\n5. **Reverse** \u2192 `A,B,C`",
+      "steps": 6,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "add_days_twice",
+      "prompt": "Add 5 days to 2026-01-01. Add another 20 days to that new date. Tell me what day of the week the final date falls on. Tell me whether that date is a weekend. Then tell me its ISO week number.",
+      "expect_tool_sequence": [
+        "date_add_days",
+        "date_add_days",
+        "date_day_of_week",
+        "calendar_is_weekend",
+        "calendar_week_number"
+      ],
+      "called_sequence": [
+        "date_add_days",
+        "date_add_days",
+        "date_day_of_week"
+      ],
+      "exact_sequence_match": false,
+      "answer_ok": true,
+      "answer": "Let me summarize the results:\n\n**Step 1:** 2026-01-01 + 5 days = **2026-01-06**\n**Step 2:** 2026-01-06 + 20 days = **2026-01-26**\n\nHere are the answers for the final date (2026-01-26):\n\n- **Day of the week:** Monday\n- **Is it a weekend?** No, it is **not** a weekend (it's a Monday)\n- **ISO week number:** Week **5**",
+      "steps": 4,
+      "stop_reason": "finished"
+    }
+  ]
+}

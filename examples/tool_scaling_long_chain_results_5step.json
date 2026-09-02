@@ -1,0 +1,170 @@
+{
+  "provider": "deepseek",
+  "registry_size": 100,
+  "total": 7,
+  "exact_sequence_accuracy": 0.5714285714285714,
+  "answer_accuracy": 1.0,
+  "by_chain_length": {
+    "5": 0.5714285714285714
+  },
+  "rows": [
+    {
+      "task_id": "sum_div_round",
+      "chain_length": 5,
+      "expect_tool_sequence": [
+        "stat_sum",
+        "math_divide",
+        "math_round",
+        "math_multiply",
+        "math_add"
+      ],
+      "called_sequence": [
+        "stat_sum",
+        "math_divide",
+        "math_multiply",
+        "math_add"
+      ],
+      "exact_sequence_match": false,
+      "answer_ok": true,
+      "answer": "The final result is **17**.\n\nLet me summarize the steps:\n1. Sum of 3, 7, 2, 9, 4 = **25**\n2. 25 \u00f7 5 = **5**\n3. Round to 1 decimal place = **5.0**\n4. 5 \u00d7 3 = **15**\n5. 15 + 2 = **17**\n\n**Final answer: 17**",
+      "steps": 5,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "snake_reverse_vowels",
+      "chain_length": 5,
+      "expect_tool_sequence": [
+        "format_snake_case",
+        "text_reverse",
+        "text_count_vowels",
+        "math_multiply",
+        "math_round"
+      ],
+      "called_sequence": [
+        "format_snake_case",
+        "text_reverse",
+        "text_count_vowels",
+        "math_multiply",
+        "math_round"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "The final result is **12**.\n\nHere's the step-by-step breakdown:\n1. **'Hello World' \u2192 snake_case:** `hello_world`\n2. **Reverse:** `dlrow_olleh`\n3. **Vowel count** in `dlrow_olleh`: 3 (the 'o', 'e', and 'o')\n4. **3 \u00d7 4 = 12**\n5. **Rounded to nearest whole number:** 12\n\n**Final answer: 12**",
+      "steps": 6,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "add_days_weekday_weekend",
+      "chain_length": 5,
+      "expect_tool_sequence": [
+        "date_add_days",
+        "date_day_of_week",
+        "calendar_is_weekend",
+        "text_uppercase",
+        "text_reverse"
+      ],
+      "called_sequence": [
+        "date_add_days",
+        "date_day_of_week",
+        "text_uppercase",
+        "text_reverse"
+      ],
+      "exact_sequence_match": false,
+      "answer_ok": true,
+      "answer": "Here's the complete chain of results:\n\n1. **Add 45 days to 2026-01-01** \u2192 **2026-02-15**\n2. **Day of the week** \u2192 **Sunday**\n3. **Is it a weekend?** \u2192 **true**\n4. **Convert to uppercase** \u2192 **TRUE**\n5. **Reverse it** \u2192 **EURT**\n\nSo the final answer is **EURT**.",
+      "steps": 5,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "km_mi_nm_round",
+      "chain_length": 5,
+      "expect_tool_sequence": [
+        "convert_km_to_miles",
+        "math_round",
+        "measure_miles_to_nautical_miles",
+        "math_round",
+        "measure_nautical_miles_to_miles"
+      ],
+      "called_sequence": [
+        "convert_km_to_miles",
+        "math_round",
+        "measure_miles_to_nautical_miles",
+        "math_round",
+        "measure_nautical_miles_to_miles"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "Let me walk through the full chain of conversions:\n\n1. **10 km \u2192 miles:** 10 km = **6.21371 miles**\n2. **Round to 2 decimal places:** **6.21 miles**\n3. **6.21 miles \u2192 nautical miles:** **5.396341 nautical miles**\n4. **Round to 1 decimal place:** **5.4 nautical miles**\n5. **5.4 nautical miles \u2192 miles:** **6.214212 miles**\n\n**Final answer: 6.214212 miles**",
+      "steps": 6,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "base64_hex_roundtrip",
+      "chain_length": 5,
+      "expect_tool_sequence": [
+        "data_base64_encode",
+        "encode_hex_encode",
+        "encode_hex_decode",
+        "data_base64_decode",
+        "text_uppercase"
+      ],
+      "called_sequence": [
+        "data_base64_encode",
+        "encode_hex_encode",
+        "encode_hex_decode",
+        "data_base64_decode",
+        "text_uppercase"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "The final result is **CHAIN**.\n\nHere's the full chain of transformations:\n1. Base64-encode `chain` \u2192 `Y2hhaW4=`\n2. Hex-encode `Y2hhaW4=` \u2192 `593268686157343d`\n3. Hex-decode `593268686157343d` \u2192 `Y2hhaW4=`\n4. Base64-decode `Y2hhaW4=` \u2192 `chain`\n5. Uppercase `chain` \u2192 **CHAIN**",
+      "steps": 6,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "sum_div_round_temp_round",
+      "chain_length": 5,
+      "expect_tool_sequence": [
+        "stat_sum",
+        "math_divide",
+        "math_round",
+        "convert_celsius_to_fahrenheit",
+        "math_round"
+      ],
+      "called_sequence": [
+        "stat_sum",
+        "math_divide",
+        "convert_celsius_to_fahrenheit",
+        "math_round"
+      ],
+      "exact_sequence_match": false,
+      "answer_ok": true,
+      "answer": "The final result is **56**.\n\nHere's the full chain of calculations:\n1. Sum of 4, 8, 15, 16, 23 = **66**\n2. 66 \u00f7 5 = **13.2**\n3. Rounded to 1 decimal place = **13.2**\n4. 13.2\u00b0C converted to Fahrenheit = **55.76\u00b0F**\n5. Rounded to nearest whole number = **56**",
+      "steps": 5,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "lower_snake_reverse_count_leap",
+      "chain_length": 5,
+      "expect_tool_sequence": [
+        "text_lowercase",
+        "format_snake_case",
+        "text_reverse",
+        "text_char_count",
+        "date_is_leap_year"
+      ],
+      "called_sequence": [
+        "text_lowercase",
+        "format_snake_case",
+        "text_reverse",
+        "text_char_count",
+        "date_is_leap_year"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "Let me summarize the full chain of operations:\n\n1. **Lowercase** 'Data Science Rocks' \u2192 `data science rocks`\n2. **Snake_case** \u2192 `data_science_rocks`\n3. **Reverse** \u2192 `skcor_ecneics_atad`\n4. **Character count** \u2192 18 characters\n5. **Leap year check** for 18 \u2192 **False**\n\n**Final answer:** The reversed text `skcor_ecneics_atad` has **18 characters**, and **18 is not a leap year** (the year 18 AD was not a leap year).",
+      "steps": 6,
+      "stop_reason": "finished"
+    }
+  ]
+}

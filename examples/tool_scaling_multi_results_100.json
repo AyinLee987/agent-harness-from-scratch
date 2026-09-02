@@ -1,0 +1,249 @@
+{
+  "provider": "deepseek",
+  "registry_size": 100,
+  "total": 14,
+  "exact_sequence_matches": 13,
+  "sequence_accuracy": 0.9285714285714286,
+  "answer_accuracy": 1.0,
+  "rows": [
+    {
+      "task_id": "convert_then_round",
+      "prompt": "Convert 10 kilometers to miles, then round the result to 1 decimal place.",
+      "expect_tool_sequence": [
+        "convert_km_to_miles",
+        "math_round"
+      ],
+      "called_sequence": [
+        "convert_km_to_miles",
+        "math_round"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "10 kilometers is equal to **6.2 miles** when rounded to 1 decimal place.\n\nHere's the breakdown:\n- 10 km = 6.21371 miles (exact conversion)\n- Rounded to 1 decimal place: **6.2 miles**",
+      "steps": 3,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "lower_then_vowels",
+      "prompt": "Convert 'Hello World' to lowercase, then count how many vowels are in the result.",
+      "expect_tool_sequence": [
+        "text_lowercase",
+        "text_count_vowels"
+      ],
+      "called_sequence": [
+        "text_lowercase",
+        "text_count_vowels"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "Let me verify the vowel count manually. In \"hello world\":\n- h-e-l-l-o (e, o = 2 vowels)\n- w-o-r-l-d (o = 1 vowel)\n\nTotal = 3 vowels.\n\n**Result:** After converting 'Hello World' to lowercase, we get **'hello world'**, which contains **3 vowels** (e, o, and o).",
+      "steps": 3,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "add_days_then_weekday",
+      "prompt": "Add 10 days to 2026-08-31, then tell me what day of the week the new date falls on.",
+      "expect_tool_sequence": [
+        "date_add_days",
+        "date_day_of_week"
+      ],
+      "called_sequence": [
+        "date_add_days",
+        "date_day_of_week"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "Adding 10 days to **2026-08-31** gives **2026-09-10**, which falls on a **Thursday**.",
+      "steps": 3,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "celsius_roundtrip",
+      "prompt": "Convert 100 degrees Celsius to Fahrenheit, then convert that result back to Celsius.",
+      "expect_tool_sequence": [
+        "convert_celsius_to_fahrenheit",
+        "convert_fahrenheit_to_celsius"
+      ],
+      "called_sequence": [
+        "convert_celsius_to_fahrenheit",
+        "convert_fahrenheit_to_celsius"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "Here are the results:\n\n1. **100\u00b0C \u2192 Fahrenheit:** 212\u00b0F\n2. **212\u00b0F \u2192 Celsius:** 100\u00b0C\n\nAs expected, the round-trip conversion returns to the original value of **100\u00b0C**.",
+      "steps": 3,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "add_twice",
+      "prompt": "What is 12 plus 8? Take that result and add 15 to it.",
+      "expect_tool_sequence": [
+        "math_add",
+        "math_add"
+      ],
+      "called_sequence": [
+        "math_add",
+        "math_add"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "The final result is **35**.\n\nHere's the breakdown:\n1. 12 + 8 = 20\n2. 20 + 15 = **35**",
+      "steps": 3,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "upper_then_reverse",
+      "prompt": "Convert 'agent' to uppercase, then reverse the result.",
+      "expect_tool_sequence": [
+        "text_uppercase",
+        "text_reverse"
+      ],
+      "called_sequence": [
+        "text_uppercase",
+        "text_reverse"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "The result is **TNEGA**.\n\nHere's the step-by-step process:\n1. Convert 'agent' to uppercase \u2192 **AGENT**\n2. Reverse the result \u2192 **TNEGA**",
+      "steps": 3,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "multiply_twice",
+      "prompt": "Multiply 3 by 4. Then multiply that result by 5.",
+      "expect_tool_sequence": [
+        "math_multiply",
+        "math_multiply"
+      ],
+      "called_sequence": [
+        "math_multiply",
+        "math_multiply"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "The result is **60**.\n\nHere's the step-by-step calculation:\n1. 3 \u00d7 4 = 12\n2. 12 \u00d7 5 = 60",
+      "steps": 3,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "base64_roundtrip",
+      "prompt": "Base64-encode the word 'agent', then decode your own result back to plain text.",
+      "expect_tool_sequence": [
+        "data_base64_encode",
+        "data_base64_decode"
+      ],
+      "called_sequence": [
+        "data_base64_encode",
+        "data_base64_decode"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "The round-trip worked perfectly. Here's the summary:\n\n1. **Base64-encode** the word `'agent'` \u2192 result: **`YWdlbnQ=`**\n2. **Decode** `YWdlbnQ=` back \u2192 result: **`agent`**\n\nThe decoded output matches the original word, confirming the encoding/decoding cycle is correct.",
+      "steps": 3,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "add_days_then_days_between",
+      "prompt": "Take 2026-01-01 and add 100 days to it. Then tell me how many days are between that new date and 2026-12-31.",
+      "expect_tool_sequence": [
+        "date_add_days",
+        "date_days_between"
+      ],
+      "called_sequence": [
+        "date_add_days",
+        "date_days_between"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "Let me summarize the results:\n\n1. **Adding 100 days to 2026-01-01** gives us **2026-04-11**.\n2. **Days between 2026-04-11 and 2026-12-31** is **264 days**.\n\nSo the answer is **264 days**.",
+      "steps": 3,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "kg_to_lb_then_round",
+      "prompt": "Convert 7 kilograms to pounds, then round the result to the nearest whole number.",
+      "expect_tool_sequence": [
+        "convert_kg_to_lbs",
+        "math_round"
+      ],
+      "called_sequence": [
+        "convert_kg_to_lbs",
+        "math_round"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "7 kilograms is equal to **15.43234 pounds**, which rounds to **15 pounds** when rounded to the nearest whole number.",
+      "steps": 3,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "replace_then_wordcount",
+      "prompt": "In the sentence 'I love cats and cats love me', replace 'cats' with 'dogs', then count how many words are in the result.",
+      "expect_tool_sequence": [
+        "text_replace",
+        "text_word_count"
+      ],
+      "called_sequence": [
+        "text_replace",
+        "text_word_count"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "Here's the step-by-step result:\n\n1. **Replacement:** Replacing 'cats' with 'dogs' in \"I love cats and cats love me\" gives us **\"I love dogs and dogs love me\"**.\n\n2. **Word count:** The resulting sentence \"I love dogs and dogs love me\" contains **7 words** (I, love, dogs, and, dogs, love, me).",
+      "steps": 3,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "average_then_round",
+      "prompt": "Compute the average of 2, 3, 5, and 7, then round it to 1 decimal place.",
+      "expect_tool_sequence": [
+        "math_average",
+        "math_round"
+      ],
+      "called_sequence": [
+        "math_average",
+        "math_round"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "The average of 2, 3, 5, and 7 is **4.25**, which rounds to **4.2** when rounded to 1 decimal place.",
+      "steps": 3,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "dedupe_then_sort",
+      "prompt": "Remove duplicate entries from this list, keeping order: b,a,c,a,b -- then sort what's left alphabetically.",
+      "expect_tool_sequence": [
+        "data_dedupe_list",
+        "data_sort_list"
+      ],
+      "called_sequence": [
+        "data_dedupe_list",
+        "data_sort_list"
+      ],
+      "exact_sequence_match": true,
+      "answer_ok": true,
+      "answer": "Here's the step-by-step result:\n\n1. **Remove duplicates** from `b,a,c,a,b` \u2192 `b,a,c` (keeping the original order of first occurrences)\n2. **Sort alphabetically** \u2192 `a,b,c`\n\n**Final result: `a,b,c`**",
+      "steps": 3,
+      "stop_reason": "finished"
+    },
+    {
+      "task_id": "add_days_twice",
+      "prompt": "Add 5 days to 2026-01-01. Then add another 20 days to that new date.",
+      "expect_tool_sequence": [
+        "date_add_days",
+        "date_add_days"
+      ],
+      "called_sequence": [
+        "date_add_days",
+        "date_add_days",
+        "date_add_days"
+      ],
+      "exact_sequence_match": false,
+      "answer_ok": true,
+      "answer": "The result is confirmed. Here's the step-by-step breakdown:\n\n1. **Start date:** 2026-01-01\n2. **Add 5 days:** 2026-01-01 + 5 days = **2026-01-06**\n3. **Add 20 days:** 2026-01-06 + 20 days = **2026-01-26**\n\n**Final answer: 2026-01-26**\n\n(Verified: 5 + 20 = 25 days total from the original date, which also gives 2026-01-26.)",
+      "steps": 4,
+      "stop_reason": "finished"
+    }
+  ]
+}

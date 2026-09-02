@@ -199,6 +199,7 @@ class DelegateTool(BaseTool):
         llm_factory: Callable[[], BaseLLM],
         call_log: Optional[List[Dict[str, Any]]] = None,
         max_steps: int = 8,
+        subagent_system_prompt: Optional[str] = None,
     ) -> None:
         self.group_name = group_name
         self.name = f"delegate_{group_name}"
@@ -207,6 +208,14 @@ class DelegateTool(BaseTool):
         self._llm_factory = llm_factory
         self._call_log = call_log if call_log is not None else []
         self._max_steps = max_steps
+        # Overridable so experiments can vary the specialist's instructions --
+        # the diagnostic in INTERVENTION_LADDER_RESULTS.md showed every skipped
+        # step is dropped *inside* a specialist that was correctly delegated
+        # to, so this, not MAIN_SYSTEM_PROMPT, is the layer that matters.
+        # Must contain a {group_name} field.
+        self._subagent_system_prompt = (
+            subagent_system_prompt or SUBAGENT_SYSTEM_PROMPT
+        )
 
     def parameters_schema(self) -> Dict[str, Any]:
         return {
@@ -230,7 +239,7 @@ class DelegateTool(BaseTool):
         sub_agent = ReActAgent(
             llm=llm,
             tools=registry,
-            system_prompt=SUBAGENT_SYSTEM_PROMPT.format(group_name=self.group_name),
+            system_prompt=self._subagent_system_prompt.format(group_name=self.group_name),
             max_steps=self._max_steps,
             agent_name=self.group_name,
         )
@@ -253,8 +262,14 @@ def build_main_registry(
     llm_factory: Callable[[], BaseLLM],
     call_log: Optional[List[Dict[str, Any]]] = None,
     max_steps: int = 8,
+    subagent_system_prompt: Optional[str] = None,
 ) -> ToolRegistry:
-    """Build the main agent's registry: base tools + one delegate per group."""
+    """Build the main agent's registry: base tools + one delegate per group.
+
+    ``subagent_system_prompt`` overrides what every specialist is told (it
+    must contain a ``{group_name}`` field). Defaults to
+    :data:`SUBAGENT_SYSTEM_PROMPT`.
+    """
 
     if call_log is None:
         call_log = []
@@ -267,6 +282,7 @@ def build_main_registry(
             llm_factory=llm_factory,
             call_log=call_log,
             max_steps=max_steps,
+            subagent_system_prompt=subagent_system_prompt,
         ))
     return registry
 

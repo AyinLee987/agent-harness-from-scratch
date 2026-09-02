@@ -64,8 +64,10 @@ def main() -> None:
 
     print("Loading result dumps")
     conditions = load(paths)
-    order = [c for c in ["baseline", "instruction", "fewshot", "hierarchical",
-                         "hierarchical_instruction"] if c in conditions]
+    preferred = ["baseline", "instruction", "fewshot",
+                 "hierarchical_bare", "hierarchical", "hierarchical_fewshot"]
+    order = [c for c in preferred if c in conditions]
+    order += [c for c in conditions if c not in order]  # never silently drop one
     print(f"  conditions: {order}\n")
 
     tasks = sorted(per_task(conditions[BASELINE], "exact_sequence_match"))

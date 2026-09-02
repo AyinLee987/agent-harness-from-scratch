@@ -1,0 +1,214 @@
+{
+  "provider": "deepseek",
+  "concise_schema_chars": 14705,
+  "verbose_schema_chars": 94975,
+  "growth_factor": 6.458687521251275,
+  "single_probe": {
+    "kind": "single_probe",
+    "total": 6,
+    "correct": 6,
+    "accuracy": 1.0,
+    "rows": [
+      {
+        "task_id": "math_modulo",
+        "used_expected_tool": true
+      },
+      {
+        "task_id": "text_replace",
+        "used_expected_tool": true
+      },
+      {
+        "task_id": "date_days_between",
+        "used_expected_tool": true
+      },
+      {
+        "task_id": "convert_kg_to_lb",
+        "used_expected_tool": true
+      },
+      {
+        "task_id": "data_json_validate",
+        "used_expected_tool": true
+      },
+      {
+        "task_id": "text_is_palindrome",
+        "used_expected_tool": true
+      }
+    ]
+  },
+  "multi_chain": {
+    "kind": "multi_chain",
+    "total": 14,
+    "correct": 14,
+    "accuracy": 1.0,
+    "rows": [
+      {
+        "task_id": "convert_then_round",
+        "expect_tool_sequence": [
+          "convert_km_to_miles",
+          "math_round"
+        ],
+        "called_sequence": [
+          "convert_km_to_miles",
+          "math_round"
+        ],
+        "exact_sequence_match": true
+      },
+      {
+        "task_id": "lower_then_vowels",
+        "expect_tool_sequence": [
+          "text_lowercase",
+          "text_count_vowels"
+        ],
+        "called_sequence": [
+          "text_lowercase",
+          "text_count_vowels"
+        ],
+        "exact_sequence_match": true
+      },
+      {
+        "task_id": "add_days_then_weekday",
+        "expect_tool_sequence": [
+          "date_add_days",
+          "date_day_of_week"
+        ],
+        "called_sequence": [
+          "date_add_days",
+          "date_day_of_week"
+        ],
+        "exact_sequence_match": true
+      },
+      {
+        "task_id": "celsius_roundtrip",
+        "expect_tool_sequence": [
+          "convert_celsius_to_fahrenheit",
+          "convert_fahrenheit_to_celsius"
+        ],
+        "called_sequence": [
+          "convert_celsius_to_fahrenheit",
+          "convert_fahrenheit_to_celsius"
+        ],
+        "exact_sequence_match": true
+      },
+      {
+        "task_id": "add_twice",
+        "expect_tool_sequence": [
+          "math_add",
+          "math_add"
+        ],
+        "called_sequence": [
+          "math_add",
+          "math_add"
+        ],
+        "exact_sequence_match": true
+      },
+      {
+        "task_id": "upper_then_reverse",
+        "expect_tool_sequence": [
+          "text_uppercase",
+          "text_reverse"
+        ],
+        "called_sequence": [
+          "text_uppercase",
+          "text_reverse"
+        ],
+        "exact_sequence_match": true
+      },
+      {
+        "task_id": "multiply_twice",
+        "expect_tool_sequence": [
+          "math_multiply",
+          "math_multiply"
+        ],
+        "called_sequence": [
+          "math_multiply",
+          "math_multiply"
+        ],
+        "exact_sequence_match": true
+      },
+      {
+        "task_id": "base64_roundtrip",
+        "expect_tool_sequence": [
+          "data_base64_encode",
+          "data_base64_decode"
+        ],
+        "called_sequence": [
+          "data_base64_encode",
+          "data_base64_decode"
+        ],
+        "exact_sequence_match": true
+      },
+      {
+        "task_id": "add_days_then_days_between",
+        "expect_tool_sequence": [
+          "date_add_days",
+          "date_days_between"
+        ],
+        "called_sequence": [
+          "date_add_days",
+          "date_days_between"
+        ],
+        "exact_sequence_match": true
+      },
+      {
+        "task_id": "kg_to_lb_then_round",
+        "expect_tool_sequence": [
+          "convert_kg_to_lbs",
+          "math_round"
+        ],
+        "called_sequence": [
+          "convert_kg_to_lbs",
+          "math_round"
+        ],
+        "exact_sequence_match": true
+      },
+      {
+        "task_id": "replace_then_wordcount",
+        "expect_tool_sequence": [
+          "text_replace",
+          "text_word_count"
+        ],
+        "called_sequence": [
+          "text_replace",
+          "text_word_count"
+        ],
+        "exact_sequence_match": true
+      },
+      {
+        "task_id": "average_then_round",
+        "expect_tool_sequence": [
+          "math_average",
+          "math_round"
+        ],
+        "called_sequence": [
+          "math_average",
+          "math_round"
+        ],
+        "exact_sequence_match": true
+      },
+      {
+        "task_id": "dedupe_then_sort",
+        "expect_tool_sequence": [
+          "data_dedupe_list",
+          "data_sort_list"
+        ],
+        "called_sequence": [
+          "data_dedupe_list",
+          "data_sort_list"
+        ],
+        "exact_sequence_match": true
+      },
+      {
+        "task_id": "add_days_twice",
+        "expect_tool_sequence": [
+          "date_add_days",
+          "date_add_days"
+        ],
+        "called_sequence": [
+          "date_add_days",
+          "date_add_days"
+        ],
+        "exact_sequence_match": true
+      }
+    ]
+  }
+}
