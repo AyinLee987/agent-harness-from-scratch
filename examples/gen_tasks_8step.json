@@ -1,0 +1,1540 @@
+[
+  {
+    "prompt": "Take the numbers 6, 1, 2, 9, 6. First, compute their sum. Then round it to 1 decimal place, then multiply by 2, then multiply by 4 again, then subtract 4, then add 3, then add another 3, then multiply by 2.",
+    "expect_tool_sequence": [
+      "stat_sum",
+      "math_round",
+      "math_multiply",
+      "math_multiply",
+      "math_subtract",
+      "math_add",
+      "math_add",
+      "math_multiply"
+    ],
+    "expect_substrings": [
+      "388"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T4_same_tool_twice"
+      ],
+      "final_value": "388"
+    },
+    "id": "gen8_0000"
+  },
+  {
+    "prompt": "Take the numbers 1, 8, 3, 7, 3. First, count how many there are. Then round it to the nearest whole number, then convert it from miles to nautical miles, then convert it back to miles, then convert it from kilograms to pounds, then convert it back to kilograms, then round it to 6 decimal places, then subtract 3.",
+    "expect_tool_sequence": [
+      "stat_count",
+      "math_round",
+      "measure_miles_to_nautical_miles",
+      "measure_nautical_miles_to_miles",
+      "convert_kg_to_lbs",
+      "convert_lbs_to_kg",
+      "math_round",
+      "math_subtract"
+    ],
+    "expect_substrings": [
+      "1.999991"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "1.999991"
+    },
+    "id": "gen8_0001"
+  },
+  {
+    "prompt": "Start with the date 2026-01-07. Then add 7 days to it, then add another 20 days, then tell me whether it is a weekend, then take that answer and reverse it, then base64-encode it, then base64-decode the result, then base64-encode it, then base64-decode the result.",
+    "expect_tool_sequence": [
+      "date_add_days",
+      "date_add_days",
+      "calendar_is_weekend",
+      "text_reverse",
+      "data_base64_encode",
+      "data_base64_decode",
+      "data_base64_encode",
+      "data_base64_decode"
+    ],
+    "expect_substrings": [
+      "eslaf"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T2_inferable_bool",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "eslaf"
+    },
+    "id": "gen8_0002"
+  },
+  {
+    "prompt": "Start with the number 36. Then convert it from meters to feet, then convert it back to meters, then subtract 5, then add 2, then round it to 6 decimal places, then subtract 3, then round it to 6 decimal places, then multiply by 4.",
+    "expect_tool_sequence": [
+      "convert_meters_to_feet",
+      "convert_feet_to_meters",
+      "math_subtract",
+      "math_add",
+      "math_round",
+      "math_subtract",
+      "math_round",
+      "math_multiply"
+    ],
+    "expect_substrings": [
+      "120.000004"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "120.000004"
+    },
+    "id": "gen8_0003"
+  },
+  {
+    "prompt": "Start with the number 20. Then multiply by 5, then round it to the nearest whole number, then subtract 3, then subtract 2 again, then round it to the nearest whole number, then convert it from square feet to square meters, then convert it back to square feet, then round it to 6 decimal places.",
+    "expect_tool_sequence": [
+      "math_multiply",
+      "math_round",
+      "math_subtract",
+      "math_subtract",
+      "math_round",
+      "measure_sqft_to_sqm",
+      "measure_sqm_to_sqft",
+      "math_round"
+    ],
+    "expect_substrings": [
+      "94.999867"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "94.999867"
+    },
+    "id": "gen8_0004"
+  },
+  {
+    "prompt": "Start with the number 120. Then add 2, then add another 4, then round it to 1 decimal place, then convert it from mph to km/h, then convert it back to mph, then convert it from meters to feet, then convert it back to meters, then round it to 6 decimal places.",
+    "expect_tool_sequence": [
+      "math_add",
+      "math_add",
+      "math_round",
+      "measure_mph_to_kmh",
+      "measure_kmh_to_mph",
+      "convert_meters_to_feet",
+      "convert_feet_to_meters",
+      "math_round"
+    ],
+    "expect_substrings": [
+      "125.999652"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "125.999652"
+    },
+    "id": "gen8_0005"
+  },
+  {
+    "prompt": "Take the text \"A Man A Plan\". Then URL-encode it, then URL-decode the result, then reverse it, then convert it to title case, then check whether it is pure ASCII, then take that answer and convert it to lowercase, then apply ROT13 to it, then count how many characters it has.",
+    "expect_tool_sequence": [
+      "data_url_encode",
+      "data_url_decode",
+      "text_reverse",
+      "text_title_case",
+      "encode_is_ascii",
+      "text_lowercase",
+      "encode_rot13",
+      "text_char_count"
+    ],
+    "expect_substrings": [
+      "4"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T2_inferable_bool",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "4"
+    },
+    "id": "gen8_0006"
+  },
+  {
+    "prompt": "Start with the number 36. Then convert it from kilometers to miles, then convert it back to kilometers, then round it to 6 decimal places, then convert it from kilometers to miles, then convert it back to kilometers, then round it to 6 decimal places, then multiply by 3, then round it to 6 decimal places.",
+    "expect_tool_sequence": [
+      "convert_km_to_miles",
+      "convert_miles_to_km",
+      "math_round",
+      "convert_km_to_miles",
+      "convert_miles_to_km",
+      "math_round",
+      "math_multiply",
+      "math_round"
+    ],
+    "expect_substrings": [
+      "107.999394"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "107.999394"
+    },
+    "id": "gen8_0007"
+  },
+  {
+    "prompt": "Take the numbers 4, 3, 5. First, count how many there are. Then round it to the nearest whole number, then subtract 3, then subtract 2 again, then convert it from Celsius to Fahrenheit, then convert it back to Celsius, then multiply by 5, then round it to the nearest whole number.",
+    "expect_tool_sequence": [
+      "stat_count",
+      "math_round",
+      "math_subtract",
+      "math_subtract",
+      "convert_celsius_to_fahrenheit",
+      "convert_fahrenheit_to_celsius",
+      "math_multiply",
+      "math_round"
+    ],
+    "expect_substrings": [
+      "-10"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "-10"
+    },
+    "id": "gen8_0008"
+  },
+  {
+    "prompt": "Start with the number 60. Then round it to 1 decimal place, then convert it from liters to gallons, then convert it back to liters, then multiply by 6, then add 10, then subtract 3, then round it to 5 decimal places, then subtract 4.",
+    "expect_tool_sequence": [
+      "math_round",
+      "convert_liters_to_gallons",
+      "convert_gallons_to_liters",
+      "math_multiply",
+      "math_add",
+      "math_subtract",
+      "math_round",
+      "math_subtract"
+    ],
+    "expect_substrings": [
+      "362.99976"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "362.99976"
+    },
+    "id": "gen8_0009"
+  },
+  {
+    "prompt": "Start with the date 2026-08-17. Then add 12 days to it, then tell me whether it is a weekend, then take that answer and reverse it, then count how many words it has, then multiply by 2, then round it to the nearest whole number, then add 2, then round it to 1 decimal place.",
+    "expect_tool_sequence": [
+      "date_add_days",
+      "calendar_is_weekend",
+      "text_reverse",
+      "text_word_count",
+      "math_multiply",
+      "math_round",
+      "math_add",
+      "math_round"
+    ],
+    "expect_substrings": [
+      "4"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T2_inferable_bool"
+      ],
+      "final_value": "4"
+    },
+    "id": "gen8_0010"
+  },
+  {
+    "prompt": "Start with the number 60. Then round it to 1 decimal place, then convert it from Celsius to Fahrenheit, then convert it back to Celsius, then subtract 3, then subtract 4 again, then round it to 1 decimal place, then convert it from mph to km/h, then convert it back to mph.",
+    "expect_tool_sequence": [
+      "math_round",
+      "convert_celsius_to_fahrenheit",
+      "convert_fahrenheit_to_celsius",
+      "math_subtract",
+      "math_subtract",
+      "math_round",
+      "measure_mph_to_kmh",
+      "measure_kmh_to_mph"
+    ],
+    "expect_substrings": [
+      "52.999852"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "52.999852"
+    },
+    "id": "gen8_0011"
+  },
+  {
+    "prompt": "Take the numbers 2, 9, 9. First, compute their sum. Then add 3, then add another 2, then round it to the nearest whole number, then divide it by 5, then convert it from meters to feet, then convert it back to meters, then round it to the nearest whole number.",
+    "expect_tool_sequence": [
+      "stat_sum",
+      "math_add",
+      "math_add",
+      "math_round",
+      "math_divide",
+      "convert_meters_to_feet",
+      "convert_feet_to_meters",
+      "math_round"
+    ],
+    "expect_substrings": [
+      "5"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "5"
+    },
+    "id": "gen8_0012"
+  },
+  {
+    "prompt": "Take the text \"Open Source Agent\". Then base64-encode it, then base64-decode the result, then hex-encode it, then hex-decode the result, then URL-encode it, then URL-decode the result, then URL-encode it, then URL-decode the result.",
+    "expect_tool_sequence": [
+      "data_base64_encode",
+      "data_base64_decode",
+      "encode_hex_encode",
+      "encode_hex_decode",
+      "data_url_encode",
+      "data_url_decode",
+      "data_url_encode",
+      "data_url_decode"
+    ],
+    "expect_substrings": [
+      "Open Source Agent"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "Open Source Agent"
+    },
+    "id": "gen8_0013"
+  },
+  {
+    "prompt": "Start with the date 2026-01-14. Then tell me whether it is a weekend, then take that answer and convert it to lowercase, then check whether it is pure ASCII, then take that answer and convert it to lowercase, then check whether it is pure ASCII, then take that answer and convert it to uppercase, then base64-encode it, then base64-decode the result.",
+    "expect_tool_sequence": [
+      "calendar_is_weekend",
+      "text_lowercase",
+      "encode_is_ascii",
+      "text_lowercase",
+      "encode_is_ascii",
+      "text_uppercase",
+      "data_base64_encode",
+      "data_base64_decode"
+    ],
+    "expect_substrings": [
+      "TRUE"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T2_inferable_bool",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "TRUE"
+    },
+    "id": "gen8_0014"
+  },
+  {
+    "prompt": "Take the numbers 5, 8, 5. First, compute their average. Then multiply by 5, then multiply by 2 again, then round it to the nearest whole number, then convert it from miles to nautical miles, then convert it back to miles, then convert it from liters to gallons, then convert it back to liters.",
+    "expect_tool_sequence": [
+      "math_average",
+      "math_multiply",
+      "math_multiply",
+      "math_round",
+      "measure_miles_to_nautical_miles",
+      "measure_nautical_miles_to_miles",
+      "convert_liters_to_gallons",
+      "convert_gallons_to_liters"
+    ],
+    "expect_substrings": [
+      "59.999971"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "59.999971"
+    },
+    "id": "gen8_0015"
+  },
+  {
+    "prompt": "Start with the date 2026-08-11. Then tell me its ISO week number, then round it to the nearest whole number, then subtract 5, then subtract 2 again, then multiply by 3, then multiply by 2 again, then round it to the nearest whole number, then divide it by 2.",
+    "expect_tool_sequence": [
+      "calendar_week_number",
+      "math_round",
+      "math_subtract",
+      "math_subtract",
+      "math_multiply",
+      "math_multiply",
+      "math_round",
+      "math_divide"
+    ],
+    "expect_substrings": [
+      "78"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T4_same_tool_twice"
+      ],
+      "final_value": "78"
+    },
+    "id": "gen8_0016"
+  },
+  {
+    "prompt": "Start with the date 2026-05-06. Then tell me whether it is a weekend, then take that answer and reverse it, then check whether it is a palindrome, then take that answer and reverse it, then check whether it is a palindrome, then take that answer and convert it to uppercase, then base64-encode it, then base64-decode the result.",
+    "expect_tool_sequence": [
+      "calendar_is_weekend",
+      "text_reverse",
+      "text_is_palindrome",
+      "text_reverse",
+      "text_is_palindrome",
+      "text_uppercase",
+      "data_base64_encode",
+      "data_base64_decode"
+    ],
+    "expect_substrings": [
+      "FALSE"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T2_inferable_bool",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "FALSE"
+    },
+    "id": "gen8_0017"
+  },
+  {
+    "prompt": "Take the text \"step by step\". Then apply ROT13 to it, then count how many bytes it takes up, then convert it from square feet to square meters, then convert it back to square feet, then subtract 3, then round it to 6 decimal places, then convert it from miles to nautical miles, then convert it back to miles.",
+    "expect_tool_sequence": [
+      "encode_rot13",
+      "encode_count_bytes",
+      "measure_sqft_to_sqm",
+      "measure_sqm_to_sqft",
+      "math_subtract",
+      "math_round",
+      "measure_miles_to_nautical_miles",
+      "measure_nautical_miles_to_miles"
+    ],
+    "expect_substrings": [
+      "8.999985"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "8.999985"
+    },
+    "id": "gen8_0018"
+  },
+  {
+    "prompt": "Start with the date 2026-07-07. Then tell me whether it is a weekend, then take that answer and reverse it, then hex-encode it, then hex-decode the result, then base64-encode it, then base64-decode the result, then convert it to kebab-case, then convert it to title case.",
+    "expect_tool_sequence": [
+      "calendar_is_weekend",
+      "text_reverse",
+      "encode_hex_encode",
+      "encode_hex_decode",
+      "data_base64_encode",
+      "data_base64_decode",
+      "format_kebab_case",
+      "text_title_case"
+    ],
+    "expect_substrings": [
+      "Eslaf"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T2_inferable_bool",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "Eslaf"
+    },
+    "id": "gen8_0019"
+  },
+  {
+    "prompt": "Start with the number 120. Then convert it from miles to nautical miles, then convert it back to miles, then convert it from Celsius to Fahrenheit, then convert it back to Celsius, then round it to 6 decimal places, then add 6, then round it to 6 decimal places, then add 2.",
+    "expect_tool_sequence": [
+      "measure_miles_to_nautical_miles",
+      "measure_nautical_miles_to_miles",
+      "convert_celsius_to_fahrenheit",
+      "convert_fahrenheit_to_celsius",
+      "math_round",
+      "math_add",
+      "math_round",
+      "math_add"
+    ],
+    "expect_substrings": [
+      "128.000024"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "128.000024"
+    },
+    "id": "gen8_0020"
+  },
+  {
+    "prompt": "Start with the number 36. Then convert it from meters to feet, then convert it back to meters, then round it to 6 decimal places, then subtract 3, then add 10, then subtract 4, then add 3, then round it to 6 decimal places.",
+    "expect_tool_sequence": [
+      "convert_meters_to_feet",
+      "convert_feet_to_meters",
+      "math_round",
+      "math_subtract",
+      "math_add",
+      "math_subtract",
+      "math_add",
+      "math_round"
+    ],
+    "expect_substrings": [
+      "42.000001"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "42.000001"
+    },
+    "id": "gen8_0021"
+  },
+  {
+    "prompt": "Take the numbers 2, 5, 3. First, count how many there are. Then subtract 4, then convert it from mph to km/h, then convert it back to mph, then round it to 6 decimal places, then convert it from kilograms to pounds, then convert it back to kilograms, then multiply by 3.",
+    "expect_tool_sequence": [
+      "stat_count",
+      "math_subtract",
+      "measure_mph_to_kmh",
+      "measure_kmh_to_mph",
+      "math_round",
+      "convert_kg_to_lbs",
+      "convert_lbs_to_kg",
+      "math_multiply"
+    ],
+    "expect_substrings": [
+      "-2.999985"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "-2.999985"
+    },
+    "id": "gen8_0022"
+  },
+  {
+    "prompt": "Take the text \"A Man A Plan\". Then check whether it is pure ASCII, then take that answer and convert it to lowercase, then check whether it is pure ASCII, then take that answer and convert it to uppercase, then URL-encode it, then URL-decode the result, then URL-encode it, then URL-decode the result.",
+    "expect_tool_sequence": [
+      "encode_is_ascii",
+      "text_lowercase",
+      "encode_is_ascii",
+      "text_uppercase",
+      "data_url_encode",
+      "data_url_decode",
+      "data_url_encode",
+      "data_url_decode"
+    ],
+    "expect_substrings": [
+      "TRUE"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T2_inferable_bool",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "TRUE"
+    },
+    "id": "gen8_0023"
+  },
+  {
+    "prompt": "Take the text \"step by step\". Then check whether it is a palindrome, then take that answer and convert it to lowercase, then convert it to uppercase, then check whether it is a palindrome, then take that answer and reverse it, then count how many bytes it takes up, then round it to the nearest whole number, then add 10.",
+    "expect_tool_sequence": [
+      "text_is_palindrome",
+      "text_lowercase",
+      "text_uppercase",
+      "text_is_palindrome",
+      "text_reverse",
+      "encode_count_bytes",
+      "math_round",
+      "math_add"
+    ],
+    "expect_substrings": [
+      "15"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T2_inferable_bool"
+      ],
+      "final_value": "15"
+    },
+    "id": "gen8_0024"
+  },
+  {
+    "prompt": "Take the text \"step by step\". Then base64-encode it, then base64-decode the result, then count how many words it has, then round it to 1 decimal place, then add 5, then add another 3, then add 4, then subtract 3.",
+    "expect_tool_sequence": [
+      "data_base64_encode",
+      "data_base64_decode",
+      "text_word_count",
+      "math_round",
+      "math_add",
+      "math_add",
+      "math_add",
+      "math_subtract"
+    ],
+    "expect_substrings": [
+      "12"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "12"
+    },
+    "id": "gen8_0025"
+  },
+  {
+    "prompt": "Start with the number 48. Then convert it from mph to km/h, then convert it back to mph, then add 3, then add another 4, then add 5, then convert it from Celsius to Fahrenheit, then convert it back to Celsius, then add 2.",
+    "expect_tool_sequence": [
+      "measure_mph_to_kmh",
+      "measure_kmh_to_mph",
+      "math_add",
+      "math_add",
+      "math_add",
+      "convert_celsius_to_fahrenheit",
+      "convert_fahrenheit_to_celsius",
+      "math_add"
+    ],
+    "expect_substrings": [
+      "61.999866"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "61.999866"
+    },
+    "id": "gen8_0026"
+  },
+  {
+    "prompt": "Take the text \"Racecar Level\". Then count how many bytes it takes up, then convert it from kilometers to miles, then convert it back to kilometers, then subtract 3, then subtract 2 again, then multiply by 3, then convert it from miles to nautical miles, then convert it back to miles.",
+    "expect_tool_sequence": [
+      "encode_count_bytes",
+      "convert_km_to_miles",
+      "convert_miles_to_km",
+      "math_subtract",
+      "math_subtract",
+      "math_multiply",
+      "measure_miles_to_nautical_miles",
+      "measure_nautical_miles_to_miles"
+    ],
+    "expect_substrings": [
+      "23.999897"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "23.999897"
+    },
+    "id": "gen8_0027"
+  },
+  {
+    "prompt": "Start with the number 60. Then subtract 2, then subtract 3 again, then round it to 1 decimal place, then subtract 5, then convert it from kilometers to miles, then convert it back to kilometers, then round it to 6 decimal places, then add 2.",
+    "expect_tool_sequence": [
+      "math_subtract",
+      "math_subtract",
+      "math_round",
+      "math_subtract",
+      "convert_km_to_miles",
+      "convert_miles_to_km",
+      "math_round",
+      "math_add"
+    ],
+    "expect_substrings": [
+      "51.99986"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "51.99986"
+    },
+    "id": "gen8_0028"
+  },
+  {
+    "prompt": "Start with the date 2026-03-10. Then add 10 days to it, then add another 20 days, then add 5 days to it, then add 10 days to it, then add another 12 days, then add 5 days to it, then add another 20 days, then tell me which calendar quarter it is in.",
+    "expect_tool_sequence": [
+      "date_add_days",
+      "date_add_days",
+      "date_add_days",
+      "date_add_days",
+      "date_add_days",
+      "date_add_days",
+      "date_add_days",
+      "date_quarter"
+    ],
+    "expect_substrings": [
+      "Q2"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T4_same_tool_twice"
+      ],
+      "final_value": "Q2"
+    },
+    "id": "gen8_0029"
+  },
+  {
+    "prompt": "Take the numbers 7, 5, 8, 5, 7. First, compute their sum. Then round it to the nearest whole number, then subtract 2, then subtract 5, then subtract 4 again, then add 2, then round it to 1 decimal place, then subtract 3.",
+    "expect_tool_sequence": [
+      "stat_sum",
+      "math_round",
+      "math_subtract",
+      "math_subtract",
+      "math_subtract",
+      "math_add",
+      "math_round",
+      "math_subtract"
+    ],
+    "expect_substrings": [
+      "20"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T4_same_tool_twice"
+      ],
+      "final_value": "20"
+    },
+    "id": "gen8_0030"
+  },
+  {
+    "prompt": "Start with the number 60. Then round it to the nearest whole number, then convert it from miles to nautical miles, then convert it back to miles, then multiply by 10, then convert it from kilometers to miles, then convert it back to kilometers, then subtract 3, then subtract 3 again.",
+    "expect_tool_sequence": [
+      "math_round",
+      "measure_miles_to_nautical_miles",
+      "measure_nautical_miles_to_miles",
+      "math_multiply",
+      "convert_km_to_miles",
+      "convert_miles_to_km",
+      "math_subtract",
+      "math_subtract"
+    ],
+    "expect_substrings": [
+      "593.998444"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "593.998444"
+    },
+    "id": "gen8_0031"
+  },
+  {
+    "prompt": "Start with the number 36. Then round it to the nearest whole number, then multiply by 2, then multiply by 3 again, then add 6, then add 3, then add another 4, then subtract 5, then subtract 4 again.",
+    "expect_tool_sequence": [
+      "math_round",
+      "math_multiply",
+      "math_multiply",
+      "math_add",
+      "math_add",
+      "math_add",
+      "math_subtract",
+      "math_subtract"
+    ],
+    "expect_substrings": [
+      "220"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T4_same_tool_twice"
+      ],
+      "final_value": "220"
+    },
+    "id": "gen8_0032"
+  },
+  {
+    "prompt": "Start with the number 100. Then subtract 3, then subtract 3 again, then round it to the nearest whole number, then convert it from liters to gallons, then convert it back to liters, then round it to 6 decimal places, then add 4, then round it to 6 decimal places.",
+    "expect_tool_sequence": [
+      "math_subtract",
+      "math_subtract",
+      "math_round",
+      "convert_liters_to_gallons",
+      "convert_gallons_to_liters",
+      "math_round",
+      "math_add",
+      "math_round"
+    ],
+    "expect_substrings": [
+      "97.999937"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "97.999937"
+    },
+    "id": "gen8_0033"
+  },
+  {
+    "prompt": "Take the numbers 1, 6, 1. First, compute their sum. Then multiply by 3, then add 10, then subtract 5, then subtract 3 again, then multiply by 2, then multiply by 2 again, then round it to the nearest whole number.",
+    "expect_tool_sequence": [
+      "stat_sum",
+      "math_multiply",
+      "math_add",
+      "math_subtract",
+      "math_subtract",
+      "math_multiply",
+      "math_multiply",
+      "math_round"
+    ],
+    "expect_substrings": [
+      "104"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T4_same_tool_twice"
+      ],
+      "final_value": "104"
+    },
+    "id": "gen8_0034"
+  },
+  {
+    "prompt": "Take the numbers 2, 8, 1, 8, 1. First, count how many there are. Then convert it from Celsius to Fahrenheit, then convert it back to Celsius, then round it to the nearest whole number, then convert it from meters to feet, then convert it back to meters, then convert it from meters to feet, then convert it back to meters.",
+    "expect_tool_sequence": [
+      "stat_count",
+      "convert_celsius_to_fahrenheit",
+      "convert_fahrenheit_to_celsius",
+      "math_round",
+      "convert_meters_to_feet",
+      "convert_feet_to_meters",
+      "convert_meters_to_feet",
+      "convert_feet_to_meters"
+    ],
+    "expect_substrings": [
+      "5.0"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "5.0"
+    },
+    "id": "gen8_0035"
+  },
+  {
+    "prompt": "Start with the number 120. Then subtract 2, then subtract 3 again, then round it to 1 decimal place, then multiply by 5, then multiply by 2 again, then round it to the nearest whole number, then convert it from kilograms to pounds, then convert it back to kilograms.",
+    "expect_tool_sequence": [
+      "math_subtract",
+      "math_subtract",
+      "math_round",
+      "math_multiply",
+      "math_multiply",
+      "math_round",
+      "convert_kg_to_lbs",
+      "convert_lbs_to_kg"
+    ],
+    "expect_substrings": [
+      "1149.997694"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "1149.997694"
+    },
+    "id": "gen8_0036"
+  },
+  {
+    "prompt": "Take the numbers 9, 2, 3, 3. First, compute their sum. Then round it to 1 decimal place, then convert it from square feet to square meters, then convert it back to square feet, then add 2, then subtract 5, then subtract 2 again, then multiply by 6.",
+    "expect_tool_sequence": [
+      "stat_sum",
+      "math_round",
+      "measure_sqft_to_sqm",
+      "measure_sqm_to_sqft",
+      "math_add",
+      "math_subtract",
+      "math_subtract",
+      "math_multiply"
+    ],
+    "expect_substrings": [
+      "71.999856"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "71.999856"
+    },
+    "id": "gen8_0037"
+  },
+  {
+    "prompt": "Start with the number 30. Then convert it from meters to feet, then convert it back to meters, then round it to 6 decimal places, then convert it from kilometers to miles, then convert it back to kilometers, then convert it from meters to feet, then convert it back to meters, then round it to 6 decimal places.",
+    "expect_tool_sequence": [
+      "convert_meters_to_feet",
+      "convert_feet_to_meters",
+      "math_round",
+      "convert_km_to_miles",
+      "convert_miles_to_km",
+      "convert_meters_to_feet",
+      "convert_feet_to_meters",
+      "math_round"
+    ],
+    "expect_substrings": [
+      "29.999919"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "29.999919"
+    },
+    "id": "gen8_0038"
+  },
+  {
+    "prompt": "Take the numbers 7, 2, 1, 7, 2. First, count how many there are. Then subtract 2, then subtract 3, then subtract 3 again, then round it to the nearest whole number, then convert it from kilograms to pounds, then convert it back to kilograms, then multiply by 3.",
+    "expect_tool_sequence": [
+      "stat_count",
+      "math_subtract",
+      "math_subtract",
+      "math_subtract",
+      "math_round",
+      "convert_kg_to_lbs",
+      "convert_lbs_to_kg",
+      "math_multiply"
+    ],
+    "expect_substrings": [
+      "-8.999982"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "-8.999982"
+    },
+    "id": "gen8_0039"
+  },
+  {
+    "prompt": "Take the numbers 3, 5, 4, 3, 2. First, compute their sum. Then round it to the nearest whole number, then multiply by 3, then multiply by 4 again, then round it to the nearest whole number, then convert it from kilometers to miles, then convert it back to kilometers, then round it to 6 decimal places.",
+    "expect_tool_sequence": [
+      "stat_sum",
+      "math_round",
+      "math_multiply",
+      "math_multiply",
+      "math_round",
+      "convert_km_to_miles",
+      "convert_miles_to_km",
+      "math_round"
+    ],
+    "expect_substrings": [
+      "203.99943"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "203.99943"
+    },
+    "id": "gen8_0040"
+  },
+  {
+    "prompt": "Take the text \"Never Odd Or Even\". Then check whether it is pure ASCII, then take that answer and convert it to lowercase, then check whether it is a palindrome, then take that answer and convert it to lowercase, then count how many words it has, then convert it from meters to feet, then convert it back to meters, then multiply by 4.",
+    "expect_tool_sequence": [
+      "encode_is_ascii",
+      "text_lowercase",
+      "text_is_palindrome",
+      "text_lowercase",
+      "text_word_count",
+      "convert_meters_to_feet",
+      "convert_feet_to_meters",
+      "math_multiply"
+    ],
+    "expect_substrings": [
+      "4"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T2_inferable_bool",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "4"
+    },
+    "id": "gen8_0041"
+  },
+  {
+    "prompt": "Take the numbers 3, 1, 2, 1. First, compute their sum. Then add 10, then multiply by 5, then multiply by 4 again, then round it to 1 decimal place, then multiply by 3, then multiply by 4 again, then round it to the nearest whole number.",
+    "expect_tool_sequence": [
+      "stat_sum",
+      "math_add",
+      "math_multiply",
+      "math_multiply",
+      "math_round",
+      "math_multiply",
+      "math_multiply",
+      "math_round"
+    ],
+    "expect_substrings": [
+      "4080"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T4_same_tool_twice"
+      ],
+      "final_value": "4080"
+    },
+    "id": "gen8_0042"
+  },
+  {
+    "prompt": "Start with the date 2026-07-20. Then add 10 days to it, then add another 30 days, then tell me whether it is a weekend, then take that answer and convert it to lowercase, then convert it to snake_case, then base64-encode it, then base64-decode the result, then convert it to uppercase.",
+    "expect_tool_sequence": [
+      "date_add_days",
+      "date_add_days",
+      "calendar_is_weekend",
+      "text_lowercase",
+      "format_snake_case",
+      "data_base64_encode",
+      "data_base64_decode",
+      "text_uppercase"
+    ],
+    "expect_substrings": [
+      "TRUE"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T2_inferable_bool",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "TRUE"
+    },
+    "id": "gen8_0043"
+  },
+  {
+    "prompt": "Start with the number 30. Then add 5, then round it to the nearest whole number, then multiply by 5, then round it to 1 decimal place, then subtract 3, then subtract 4 again, then round it to the nearest whole number, then add 6.",
+    "expect_tool_sequence": [
+      "math_add",
+      "math_round",
+      "math_multiply",
+      "math_round",
+      "math_subtract",
+      "math_subtract",
+      "math_round",
+      "math_add"
+    ],
+    "expect_substrings": [
+      "174"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T4_same_tool_twice"
+      ],
+      "final_value": "174"
+    },
+    "id": "gen8_0044"
+  },
+  {
+    "prompt": "Start with the number 48. Then subtract 2, then subtract 3 again, then round it to the nearest whole number, then multiply by 3, then multiply by 2 again, then convert it from square feet to square meters, then convert it back to square feet, then add 3.",
+    "expect_tool_sequence": [
+      "math_subtract",
+      "math_subtract",
+      "math_round",
+      "math_multiply",
+      "math_multiply",
+      "measure_sqft_to_sqm",
+      "measure_sqm_to_sqft",
+      "math_add"
+    ],
+    "expect_substrings": [
+      "260.999639"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "260.999639"
+    },
+    "id": "gen8_0045"
+  },
+  {
+    "prompt": "Take the numbers 3, 4, 5, 2, 4. First, compute their average. Then round it to 1 decimal place, then subtract 2, then subtract 2 again, then multiply by 2, then multiply by 3 again, then round it to 1 decimal place, then multiply by 6.",
+    "expect_tool_sequence": [
+      "math_average",
+      "math_round",
+      "math_subtract",
+      "math_subtract",
+      "math_multiply",
+      "math_multiply",
+      "math_round",
+      "math_multiply"
+    ],
+    "expect_substrings": [
+      "-14.4"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T4_same_tool_twice"
+      ],
+      "final_value": "-14.4"
+    },
+    "id": "gen8_0046"
+  },
+  {
+    "prompt": "Start with the number 48. Then convert it from meters to feet, then convert it back to meters, then subtract 4, then multiply by 2, then convert it from meters to feet, then convert it back to meters, then multiply by 6, then round it to 6 decimal places.",
+    "expect_tool_sequence": [
+      "convert_meters_to_feet",
+      "convert_feet_to_meters",
+      "math_subtract",
+      "math_multiply",
+      "convert_meters_to_feet",
+      "convert_feet_to_meters",
+      "math_multiply",
+      "math_round"
+    ],
+    "expect_substrings": [
+      "528.000042"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "528.000042"
+    },
+    "id": "gen8_0047"
+  },
+  {
+    "prompt": "Start with the number 24. Then subtract 4, then round it to 1 decimal place, then convert it from liters to gallons, then convert it back to liters, then multiply by 3, then round it to 6 decimal places, then multiply by 5, then multiply by 4 again.",
+    "expect_tool_sequence": [
+      "math_subtract",
+      "math_round",
+      "convert_liters_to_gallons",
+      "convert_gallons_to_liters",
+      "math_multiply",
+      "math_round",
+      "math_multiply",
+      "math_multiply"
+    ],
+    "expect_substrings": [
+      "1199.99922"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "1199.99922"
+    },
+    "id": "gen8_0048"
+  },
+  {
+    "prompt": "Start with the number 60. Then add 2, then add another 4, then round it to the nearest whole number, then multiply by 2, then multiply by 3 again, then subtract 5, then subtract 2 again, then round it to the nearest whole number.",
+    "expect_tool_sequence": [
+      "math_add",
+      "math_add",
+      "math_round",
+      "math_multiply",
+      "math_multiply",
+      "math_subtract",
+      "math_subtract",
+      "math_round"
+    ],
+    "expect_substrings": [
+      "389"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T4_same_tool_twice"
+      ],
+      "final_value": "389"
+    },
+    "id": "gen8_0049"
+  },
+  {
+    "prompt": "Take the numbers 9, 8, 5. First, compute their average. Then subtract 3, then subtract 4 again, then add 3, then add another 3, then subtract 2, then subtract 2 again, then round it to 6 decimal places.",
+    "expect_tool_sequence": [
+      "math_average",
+      "math_subtract",
+      "math_subtract",
+      "math_add",
+      "math_add",
+      "math_subtract",
+      "math_subtract",
+      "math_round"
+    ],
+    "expect_substrings": [
+      "2.333333"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T4_same_tool_twice"
+      ],
+      "final_value": "2.333333"
+    },
+    "id": "gen8_0050"
+  },
+  {
+    "prompt": "Start with the number 30. Then divide it by 2, then round it to the nearest whole number, then subtract 4, then convert it from meters to feet, then convert it back to meters, then round it to the nearest whole number, then subtract 3, then round it to the nearest whole number.",
+    "expect_tool_sequence": [
+      "math_divide",
+      "math_round",
+      "math_subtract",
+      "convert_meters_to_feet",
+      "convert_feet_to_meters",
+      "math_round",
+      "math_subtract",
+      "math_round"
+    ],
+    "expect_substrings": [
+      "8"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "8"
+    },
+    "id": "gen8_0051"
+  },
+  {
+    "prompt": "Take the numbers 5, 3, 2. First, compute their sum. Then round it to the nearest whole number, then subtract 2, then subtract 2 again, then convert it from mph to km/h, then convert it back to mph, then round it to 6 decimal places, then subtract 4.",
+    "expect_tool_sequence": [
+      "stat_sum",
+      "math_round",
+      "math_subtract",
+      "math_subtract",
+      "measure_mph_to_kmh",
+      "measure_kmh_to_mph",
+      "math_round",
+      "math_subtract"
+    ],
+    "expect_substrings": [
+      "1.999983"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "1.999983"
+    },
+    "id": "gen8_0052"
+  },
+  {
+    "prompt": "Take the numbers 5, 6, 1, 6. First, compute their sum. Then subtract 6, then round it to 1 decimal place, then divide it by 2, then multiply by 4, then multiply by 2, then multiply by 2 again, then round it to the nearest whole number.",
+    "expect_tool_sequence": [
+      "stat_sum",
+      "math_subtract",
+      "math_round",
+      "math_divide",
+      "math_multiply",
+      "math_multiply",
+      "math_multiply",
+      "math_round"
+    ],
+    "expect_substrings": [
+      "96"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T4_same_tool_twice"
+      ],
+      "final_value": "96"
+    },
+    "id": "gen8_0053"
+  },
+  {
+    "prompt": "Start with the number 24. Then round it to the nearest whole number, then subtract 2, then subtract 3 again, then round it to the nearest whole number, then add 2, then add another 2, then multiply by 3, then multiply by 2 again.",
+    "expect_tool_sequence": [
+      "math_round",
+      "math_subtract",
+      "math_subtract",
+      "math_round",
+      "math_add",
+      "math_add",
+      "math_multiply",
+      "math_multiply"
+    ],
+    "expect_substrings": [
+      "138"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T4_same_tool_twice"
+      ],
+      "final_value": "138"
+    },
+    "id": "gen8_0054"
+  },
+  {
+    "prompt": "Take the numbers 3, 8, 3, 4. First, compute their sum. Then multiply by 10, then round it to the nearest whole number, then subtract 5, then subtract 4 again, then round it to the nearest whole number, then add 5, then add another 4.",
+    "expect_tool_sequence": [
+      "stat_sum",
+      "math_multiply",
+      "math_round",
+      "math_subtract",
+      "math_subtract",
+      "math_round",
+      "math_add",
+      "math_add"
+    ],
+    "expect_substrings": [
+      "180"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T4_same_tool_twice"
+      ],
+      "final_value": "180"
+    },
+    "id": "gen8_0055"
+  },
+  {
+    "prompt": "Take the numbers 6, 2, 4. First, count how many there are. Then round it to the nearest whole number, then convert it from Celsius to Fahrenheit, then convert it back to Celsius, then convert it from kilograms to pounds, then convert it back to kilograms, then round it to 6 decimal places, then subtract 10.",
+    "expect_tool_sequence": [
+      "stat_count",
+      "math_round",
+      "convert_celsius_to_fahrenheit",
+      "convert_fahrenheit_to_celsius",
+      "convert_kg_to_lbs",
+      "convert_lbs_to_kg",
+      "math_round",
+      "math_subtract"
+    ],
+    "expect_substrings": [
+      "-7.000006"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T3_small_stat",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "-7.000006"
+    },
+    "id": "gen8_0056"
+  },
+  {
+    "prompt": "Start with the number 60. Then subtract 2, then subtract 3 again, then round it to the nearest whole number, then convert it from kilograms to pounds, then convert it back to kilograms, then subtract 5, then subtract 2 again, then round it to 6 decimal places.",
+    "expect_tool_sequence": [
+      "math_subtract",
+      "math_subtract",
+      "math_round",
+      "convert_kg_to_lbs",
+      "convert_lbs_to_kg",
+      "math_subtract",
+      "math_subtract",
+      "math_round"
+    ],
+    "expect_substrings": [
+      "47.99989"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "47.99989"
+    },
+    "id": "gen8_0057"
+  },
+  {
+    "prompt": "Start with the number 30. Then convert it from kilograms to pounds, then convert it back to kilograms, then subtract 6, then round it to 5 decimal places, then multiply by 3, then multiply by 3 again, then add 4, then subtract 5.",
+    "expect_tool_sequence": [
+      "convert_kg_to_lbs",
+      "convert_lbs_to_kg",
+      "math_subtract",
+      "math_round",
+      "math_multiply",
+      "math_multiply",
+      "math_add",
+      "math_subtract"
+    ],
+    "expect_substrings": [
+      "214.99946"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T1_noop_round",
+        "T4_same_tool_twice",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "214.99946"
+    },
+    "id": "gen8_0058"
+  },
+  {
+    "prompt": "Take the text \"tool calling matters\". Then check whether it is a palindrome, then take that answer and convert it to lowercase, then check whether it is a palindrome, then take that answer and convert it to uppercase, then hex-encode it, then hex-decode the result, then hex-encode it, then hex-decode the result.",
+    "expect_tool_sequence": [
+      "text_is_palindrome",
+      "text_lowercase",
+      "text_is_palindrome",
+      "text_uppercase",
+      "encode_hex_encode",
+      "encode_hex_decode",
+      "encode_hex_encode",
+      "encode_hex_decode"
+    ],
+    "expect_substrings": [
+      "FALSE"
+    ],
+    "_meta": {
+      "chain_length": 8,
+      "trigger_classes": [
+        "T2_inferable_bool",
+        "T5_identity_roundtrip"
+      ],
+      "final_value": "FALSE"
+    },
+    "id": "gen8_0059"
+  }
+]

@@ -54,8 +54,10 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))  # repo root -> `import agent`
@@ -64,6 +66,9 @@ sys.path.insert(0, _HERE)  # examples dir -> local imports
 from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv()
+
+# Hundreds of runs would otherwise leave hundreds of per-run log files behind.
+os.environ.setdefault("AGENT_LOG_PER_RUN", "false")
 
 from agent import ReActAgent, ToolRegistry  # noqa: E402
 from agent.trigger.react_loop import DEFAULT_SYSTEM_PROMPT  # noqa: E402
@@ -215,83 +220,121 @@ def _make_llm(provider: str):
     raise ValueError(f"Unknown provider: {provider}")
 
 
-def _load_tasks() -> list[dict]:
+def _load_tasks(paths: tuple[str, ...] = TASK_FILES) -> list[dict]:
     tasks: list[dict] = []
     seen: set[str] = set()
-    for path in TASK_FILES:
+    for path in paths:
         with open(path, "r", encoding="utf-8") as fh:
             for task in json.load(fh):
                 if task["id"] in seen:
                     raise RuntimeError(f"Duplicate task id across files: {task['id']}")
                 seen.add(task["id"])
                 task["_source"] = os.path.basename(path)
-                task["_triggers"] = classify_triggers(task["expect_tool_sequence"])
+                # Generated tasks carry their trigger classes in _meta; hand
+                # written ones get them derived from the expected sequence.
+                task["_triggers"] = (
+                    task.get("_meta", {}).get("trigger_classes")
+                    or classify_triggers(task["expect_tool_sequence"])
+                )
                 tasks.append(task)
     return tasks
 
 
+def step_recall(called: list[str], expected: list[str]) -> tuple[float, int]:
+    """Fraction of required calls actually made, and how many extra were made.
+
+    Multiset-based, so a chain needing math_add twice only gets full credit if
+    it was called twice. Much lower variance than all-or-nothing exact match:
+    one skipped step in an 8-step chain scores 0.875 rather than 0.
+    """
+    made = Counter(called) & Counter(expected)
+    hit = sum(made.values())
+    return (hit / len(expected) if expected else 0.0), len(called) - hit
+
+
+_PRINT_LOCK = threading.Lock()
+
+
+def _one_run(task: dict, trial: int, system_prompt: str, provider: str,
+             max_steps: int, delay: float) -> dict:
+    expected = task["expect_tool_sequence"]
+    # Fresh LLM, agent and registry per run: nothing is shared across threads
+    # except the pure tool functions themselves.
+    registry = ToolRegistry(ALL_TOOLS)
+    try:
+        agent = ReActAgent(
+            llm=_make_llm(provider), tools=registry,
+            system_prompt=system_prompt, max_steps=max_steps,
+        )
+        outcome = agent.run(task["prompt"])
+    except Exception as exc:  # noqa: BLE001 - keep the sweep going
+        with _PRINT_LOCK:
+            print(f"  {task['id']:<16} t{trial} ERROR: {exc}")
+        return {
+            "task_id": task["id"], "trial": trial, "error": str(exc),
+            "exact_sequence_match": False, "answer_ok": False,
+            "failure_kind": "error", "step_recall": 0.0, "extra_calls": 0,
+            "triggers": task["_triggers"],
+        }
+
+    called = [
+        (step.get("action") or {}).get("name")
+        for step in outcome.trajectory if step.get("action")
+    ]
+    exact = called == expected
+    answer_ok = all(
+        s.lower() in outcome.answer.lower()
+        for s in task.get("expect_substrings", [])
+    )
+    kind = classify_failure(called, expected)
+    recall, extra = step_recall(called, expected)
+
+    missing = list((Counter(expected) - Counter(called)).elements())
+    with _PRINT_LOCK:
+        print(f"  {task['id']:<16} t{trial} seq={'ok' if exact else 'X ':<2} "
+              f"ans={'ok' if answer_ok else 'X ':<2} {kind:<6} "
+              f"recall={recall:.2f} {len(called)}/{len(expected)}"
+              f"{'  missing=' + ','.join(missing) if missing else ''}")
+
+    if delay:
+        time.sleep(delay)
+    return {
+        "task_id": task["id"], "trial": trial,
+        "triggers": task["_triggers"],
+        "expect_tool_sequence": expected,
+        "called_sequence": called,
+        "exact_sequence_match": exact,
+        "answer_ok": answer_ok,
+        "failure_kind": kind,
+        "step_recall": recall,
+        "extra_calls": extra,
+        "answer": outcome.answer,
+        "steps": outcome.steps,
+        "stop_reason": outcome.stop_reason,
+    }
+
+
 def run_condition(
-    name: str, system_prompt: str, tasks: list[dict], registry: ToolRegistry,
-    provider: str, max_steps: int, delay: float, repeat: int,
+    name: str, system_prompt: str, tasks: list[dict],
+    provider: str, max_steps: int, delay: float, repeat: int, workers: int,
 ) -> dict:
     print("=" * 78)
     print(f"CONDITION: {name}   (provider={provider}, tools={len(ALL_TOOLS)}, "
-          f"tasks={len(tasks)}, repeat={repeat})")
+          f"tasks={len(tasks)}, repeat={repeat}, workers={workers})")
     print("=" * 78)
 
-    rows = []
-    for task in tasks:
-        expected = task["expect_tool_sequence"]
-        for trial in range(repeat):
-            llm = _make_llm(provider)
-            agent = ReActAgent(
-                llm=llm, tools=registry, system_prompt=system_prompt,
-                max_steps=max_steps,
-            )
-            try:
-                outcome = agent.run(task["prompt"])
-            except Exception as exc:  # noqa: BLE001 - keep the sweep going
-                rows.append({
-                    "task_id": task["id"], "trial": trial, "error": str(exc),
-                    "exact_sequence_match": False, "answer_ok": False,
-                    "failure_kind": "error", "triggers": task["_triggers"],
-                })
-                print(f"  {task['id']:<30} t{trial} ERROR: {exc}")
-                if delay:
-                    time.sleep(delay)
-                continue
-
-            called = [
-                (step.get("action") or {}).get("name")
-                for step in outcome.trajectory if step.get("action")
-            ]
-            exact = called == expected
-            answer_ok = all(
-                s.lower() in outcome.answer.lower()
-                for s in task.get("expect_substrings", [])
-            )
-            kind = classify_failure(called, expected)
-
-            missing = [n for n in expected if n not in called] if not exact else []
-            print(f"  {task['id']:<30} t{trial} seq={'ok ' if exact else 'X  '} "
-                  f"ans={'ok' if answer_ok else 'X '} kind={kind:<6} "
-                  f"steps={len(called)}/{len(expected)}"
-                  f"{'  missing=' + ','.join(missing) if missing else ''}")
-
-            rows.append({
-                "task_id": task["id"], "trial": trial,
-                "triggers": task["_triggers"],
-                "expect_tool_sequence": expected,
-                "called_sequence": called,
-                "exact_sequence_match": exact,
-                "answer_ok": answer_ok,
-                "failure_kind": kind,
-                "answer": outcome.answer,
-                "steps": outcome.steps,
-                "stop_reason": outcome.stop_reason,
-            })
-            if delay:
-                time.sleep(delay)
+    jobs = [(t, k) for t in tasks for k in range(repeat)]
+    rows: list[dict] = []
+    started = time.time()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(_one_run, t, k, system_prompt, provider, max_steps, delay)
+            for t, k in jobs
+        ]
+        for fut in as_completed(futures):
+            rows.append(fut.result())
+    rows.sort(key=lambda r: (r["task_id"], r["trial"]))
+    print(f"  ({len(rows)} runs in {time.time() - started:.0f}s)")
 
     return summarize(name, system_prompt, rows)
 
@@ -301,24 +344,51 @@ def summarize(name: str, system_prompt: str, rows: list[dict]) -> dict:
     exact = sum(r["exact_sequence_match"] for r in rows)
     answers = sum(r["answer_ok"] for r in rows)
     kinds = Counter(r["failure_kind"] for r in rows)
+    mean_recall = sum(r["step_recall"] for r in rows) / total if total else 0.0
+    extra_total = sum(r["extra_calls"] for r in rows)
 
-    by_trigger: dict[str, dict] = defaultdict(lambda: {"n": 0, "exact": 0})
+    by_trigger: dict[str, dict] = defaultdict(lambda: {"n": 0, "exact": 0, "recall": 0.0})
     for row in rows:
         for tag in row["triggers"]:
             by_trigger[tag]["n"] += 1
             by_trigger[tag]["exact"] += int(row["exact_sequence_match"])
+            by_trigger[tag]["recall"] += row["step_recall"]
     trigger_stats = {
-        tag: {**v, "accuracy": v["exact"] / v["n"] if v["n"] else 0.0}
+        tag: {
+            "n": v["n"], "exact": v["exact"],
+            "accuracy": v["exact"] / v["n"] if v["n"] else 0.0,
+            "mean_step_recall": v["recall"] / v["n"] if v["n"] else 0.0,
+        }
         for tag, v in sorted(by_trigger.items())
     }
 
+    # Per-task pass rate across trials -- the unit for paired tests when k>1.
+    per_task: dict[str, list] = defaultdict(list)
+    for row in rows:
+        per_task[row["task_id"]].append(row["exact_sequence_match"])
+    task_rates = {t: sum(v) / len(v) for t, v in sorted(per_task.items())}
+
+    # Which required tool gets dropped, and how often.
+    skipped = Counter()
+    for row in rows:
+        if row.get("called_sequence") is not None:
+            for name_ in (Counter(row["expect_tool_sequence"])
+                          - Counter(row["called_sequence"])).elements():
+                skipped[name_] += 1
+
     print("-" * 78)
     print(f"  exact tool-sequence match : {exact}/{total} = {exact / total:.1%}")
+    print(f"  mean step recall          : {mean_recall:.3f}")
     print(f"  final-answer accuracy     : {answers}/{total} = {answers / total:.1%}")
-    print(f"  failure kinds             : {dict(kinds)}")
+    print(f"  failure kinds             : {dict(kinds)}   extra calls: {extra_total}")
     print("  by trigger class:")
     for tag, v in trigger_stats.items():
-        print(f"    {tag:<24} {v['exact']}/{v['n']} = {v['accuracy']:.1%}")
+        print(f"    {tag:<24} {v['exact']:>4}/{v['n']:<4} = {v['accuracy']:>6.1%}"
+              f"   recall={v['mean_step_recall']:.3f}")
+    if skipped:
+        print("  most-skipped required tools:")
+        for name_, c in skipped.most_common(6):
+            print(f"    {name_:<32} {c}")
     print("=" * 78 + "\n")
 
     return {
@@ -327,9 +397,13 @@ def summarize(name: str, system_prompt: str, rows: list[dict]) -> dict:
         "total": total,
         "exact_sequence_matches": exact,
         "sequence_accuracy": exact / total if total else 0.0,
+        "mean_step_recall": mean_recall,
         "answer_accuracy": answers / total if total else 0.0,
         "failure_kinds": dict(kinds),
+        "extra_calls_total": extra_total,
         "by_trigger_class": trigger_stats,
+        "per_task_pass_rate": task_rates,
+        "skipped_tools": dict(skipped.most_common()),
         "rows": rows,
     }
 
@@ -340,13 +414,16 @@ def main() -> None:
     parser.add_argument("--conditions", nargs="+", default=list(CONDITIONS),
                         choices=list(CONDITIONS))
     parser.add_argument("--repeat", type=int, default=1, help="Runs per task per condition.")
+    parser.add_argument("--tasks", nargs="+", default=list(TASK_FILES),
+                        help="Task JSON files (default: the 21-task Test-A set).")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Concurrent agent runs. >1 is required for large sweeps.")
     parser.add_argument("--max-steps", type=int, default=14)
     parser.add_argument("--delay", type=float, default=0.2)
     parser.add_argument("--dump", metavar="PATH", default=None)
     args = parser.parse_args()
 
-    tasks = _load_tasks()
-    registry = ToolRegistry(ALL_TOOLS)
+    tasks = _load_tasks(tuple(args.tasks))
     known = {t.name for t in ALL_TOOLS}
     for task in tasks:
         unknown = [t for t in task["expect_tool_sequence"] if t not in known]
@@ -356,15 +433,17 @@ def main() -> None:
     report = {
         "provider": args.provider,
         "registry_size": len(ALL_TOOLS),
+        "task_files": [os.path.basename(p) for p in args.tasks],
         "task_count": len(tasks),
+        "chain_length": sorted({len(t["expect_tool_sequence"]) for t in tasks}),
         "repeat": args.repeat,
         "conditions": {},
     }
 
     for name in args.conditions:
         report["conditions"][name] = run_condition(
-            name, CONDITIONS[name], tasks, registry,
-            args.provider, args.max_steps, args.delay, args.repeat,
+            name, CONDITIONS[name], tasks,
+            args.provider, args.max_steps, args.delay, args.repeat, args.workers,
         )
         if args.dump:  # write after every condition so a crash keeps progress
             with open(args.dump, "w", encoding="utf-8") as fh:
@@ -373,10 +452,12 @@ def main() -> None:
     print("=" * 78)
     print("LADDER SUMMARY")
     print("=" * 78)
-    print(f"  {'condition':<14} {'seq match':>10} {'answer':>8}   failure kinds")
+    print(f"  {'condition':<14} {'seq match':>10} {'recall':>8} {'answer':>8} "
+          f"{'extra':>6}   failure kinds")
     for name, res in report["conditions"].items():
         print(f"  {name:<14} {res['sequence_accuracy']:>9.1%} "
-              f"{res['answer_accuracy']:>8.1%}   {res['failure_kinds']}")
+              f"{res['mean_step_recall']:>8.3f} {res['answer_accuracy']:>8.1%} "
+              f"{res['extra_calls_total']:>6}   {res['failure_kinds']}")
     print("=" * 78)
 
     if args.dump:
