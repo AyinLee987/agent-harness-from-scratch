@@ -209,7 +209,7 @@ class DelegateTool(BaseTool):
         self._call_log = call_log if call_log is not None else []
         self._max_steps = max_steps
         # Overridable so experiments can vary the specialist's instructions --
-        # the diagnostic in INTERVENTION_LADDER_RESULTS.md showed every skipped
+        # the diagnostic in INTERVENTION_LADDER.md showed every skipped
         # step is dropped *inside* a specialist that was correctly delegated
         # to, so this, not MAIN_SYSTEM_PROMPT, is the layer that matters.
         # Must contain a {group_name} field.

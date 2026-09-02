@@ -35,7 +35,9 @@ For hierarchical conditions each specialist's own calls are flattened in
 delegation order and compared against expect_tool_sequence -- the same metric
 the flat conditions use, kept apples-to-apples.
 
-Results and full methodology: examples/INTERVENTION_LADDER_RESULTS.md
+Conditions and generator notes: examples/INTERVENTION_LADDER.md
+Results, statistics and findings: the companion evaluation project's
+benchmarks/intervention_ladder/ and reports/intervention-ladder-evaluation.md
 
 Usage
 -----
