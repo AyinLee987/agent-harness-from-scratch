@@ -1,51 +1,46 @@
-"""Intervention ladder: can a prompt fix the silent step-skipping failure?
+"""Intervention ladder: what actually fixes silent step-skipping?
 
-Context
--------
-``tool_scaling_multi_test.py`` / ``tool_scaling_long_chain_test.py`` found that
-at 5+ step chains the exact tool-sequence match rate drops to 57% while final
-answer accuracy stays at 100% -- the model *silently skips steps it judges
-redundant*. ``hierarchical_agent_test.py`` then recovered 57% -> 67% with
-main-agent + specialist-subagent routing, at ~2x the LLM round trips.
+The tool-scaling experiments established that tool count (6->100) and tool
+description length (6.5x) cause no measurable degradation, and that the real
+variable is chain length: past 5 steps the model silently skips steps it
+judges redundant. This script measures a ladder of interventions against that
+failure, from free to expensive.
 
-Nobody has yet checked the cheapest possible intervention: **just tell the
-model not to skip steps.** That matters a lot, because the default system
-prompt currently ends with
-
-    "When you have enough information, respond with a final answer and do not
-     call any more tools."
-
-which actively *encourages* early stopping. If a one-line prompt change
-recovers most of the gap, then the architectural mitigation (2x cost) and any
-weight-level fix are over-engineering, and that is the finding.
-
-This script runs the same 21 five-step tasks (the union of both task files --
-"Test-A") under three conditions:
-
-    baseline     the shipped DEFAULT_SYSTEM_PROMPT, verbatim
-    instruction  early-stop clause removed + an explicit no-skip rule
-    fewshot      instruction + two worked examples that execute a redundant
-                 step (a no-op round, and an identity round-trip)
+    baseline                  the shipped DEFAULT_SYSTEM_PROMPT, verbatim --
+                              which notably ends with "when you have enough
+                              information ... do not call any more tools",
+                              i.e. it encourages the failure
+    instruction               that clause replaced by an explicit
+                              completeness rule; nothing else changed
+    fewshot                   instruction + two worked examples that execute
+                              a redundant step
+    hierarchical              main agent + 5 specialist subagents; the model
+                              is told nothing, its tool surface is shrunk
+    hierarchical_instruction  both, to see whether they stack
 
 Scoring per run
 ---------------
     exact_sequence_match  called tool names, in order == expect_tool_sequence
-    answer_ok             final answer contains expect_substrings
-    failure_kind          skip / extra / other  (the Stage-2 bucket taxonomy)
+    step_recall           multiset overlap / len(expected); one skipped step
+                          in an 8-step chain scores 0.875, not 0
+    answer_ok             final answer contains the chain's real final value
+    failure_kind          skip / extra / other / match
+    extra_calls           calls beyond the required multiset
 
-``skip`` and ``extra`` are tracked separately on purpose: an intervention that
-tells the model "never skip a step" can easily over-correct into calling tools
-that were never asked for. On these tasks the expected sequence is exact, so
-any extra call is measurable over-correction -- a Test-C signal for free.
+skip and extra are tracked separately on purpose: an intervention that says
+"never skip a step" can trade one failure for the other and look neutral on
+exact match. That is exactly what `instruction` does at 8 steps.
 
-Results are also broken down by trigger class (see PLAN.md 5.3) so we can see
-*which* kinds of redundant step a prompt does and does not fix.
+For hierarchical conditions each specialist's own calls are flattened in
+delegation order and compared against expect_tool_sequence -- the same metric
+the flat conditions use, kept apples-to-apples.
+
+Results and full methodology: examples/INTERVENTION_LADDER_RESULTS.md
 
 Usage
 -----
-    python examples/intervention_ladder_test.py
-    python examples/intervention_ladder_test.py --conditions baseline instruction
-    python examples/intervention_ladder_test.py --repeat 3 --dump ladder.json
+    python examples/intervention_ladder_test.py            # Test-A, k=1
+    python examples/intervention_ladder_test.py         --tasks examples/gen_tasks_8step.json         --conditions baseline instruction fewshot hierarchical         --repeat 3 --workers 10 --max-steps 20 --dump results.json
 """
 
 from __future__ import annotations
@@ -74,6 +69,7 @@ from agent import ReActAgent, ToolRegistry  # noqa: E402
 from agent.trigger.react_loop import DEFAULT_SYSTEM_PROMPT  # noqa: E402
 
 from tool_scaling_kit import ALL_TOOLS  # noqa: E402
+from hierarchical_agent_kit import MAIN_SYSTEM_PROMPT, build_main_registry  # noqa: E402
 
 TASK_FILES = (
     os.path.join(_HERE, "tool_scaling_multi_tasks.json"),
@@ -89,11 +85,7 @@ TASK_FILES = (
 # information, stop" clause -- which is the likely source of the skipping --
 # is replaced with an explicit completeness rule. Everything else is kept
 # byte-identical so the only variable is the step-completeness instruction.
-INSTRUCTION_PROMPT = (
-    "You are a helpful ReAct agent. Reason step by step. Use the provided tools "
-    "when they help answer the user's request. If a memory_search tool is available "
-    "and the user asks about something you might have stored from past conversations "
-    "or domain knowledge, call it proactively.\n\n"
+COMPLETENESS_RULE = (
     "Execute EVERY step the user's request asks for, as a separate tool call, in the "
     "order given. Do this even when a step looks unnecessary -- for example when "
     "rounding a value that is already at the requested precision, when a conversion "
@@ -101,6 +93,14 @@ INSTRUCTION_PROMPT = (
     "you could work out the result yourself. A step you can predict the answer to "
     "still has to be executed. Only give your final answer once every requested step "
     "has actually been carried out with a tool call."
+)
+
+INSTRUCTION_PROMPT = (
+    "You are a helpful ReAct agent. Reason step by step. Use the provided tools "
+    "when they help answer the user's request. If a memory_search tool is available "
+    "and the user asks about something you might have stored from past conversations "
+    "or domain knowledge, call it proactively.\n\n"
+    + COMPLETENESS_RULE
 )
 
 # The worked examples deliberately use tools that do NOT appear in any Test-A
@@ -131,7 +131,18 @@ CONDITIONS = {
     "baseline": DEFAULT_SYSTEM_PROMPT,
     "instruction": INSTRUCTION_PROMPT,
     "fewshot": INSTRUCTION_PROMPT + FEWSHOT_BLOCK,
+    # Rung 3: don't tell the model anything, shrink what it has to look at.
+    # The main agent sees 5 delegate_* tools (2,728 chars of schema) instead
+    # of 100 tools (30,630), and each specialist sees only its own category.
+    "hierarchical": MAIN_SYSTEM_PROMPT,
+    # Rung 3+1: do the routing AND state the completeness rule, to see whether
+    # the two interventions stack or are fixing the same thing.
+    "hierarchical_instruction": MAIN_SYSTEM_PROMPT + "\n\n" + COMPLETENESS_RULE,
 }
+
+# Conditions that run through the main-agent + specialist-subagent kit rather
+# than a flat 100-tool registry.
+HIERARCHICAL = {"hierarchical", "hierarchical_instruction"}
 
 
 # --------------------------------------------------------------------------
@@ -256,12 +267,21 @@ _PRINT_LOCK = threading.Lock()
 
 
 def _one_run(task: dict, trial: int, system_prompt: str, provider: str,
-             max_steps: int, delay: float) -> dict:
+             max_steps: int, delay: float, hierarchical: bool = False,
+             sub_max_steps: int = 8) -> dict:
     expected = task["expect_tool_sequence"]
     # Fresh LLM, agent and registry per run: nothing is shared across threads
     # except the pure tool functions themselves.
-    registry = ToolRegistry(ALL_TOOLS)
+    call_log: list = []
     try:
+        if hierarchical:
+            registry = build_main_registry(
+                llm_factory=lambda: _make_llm(provider),
+                call_log=call_log,
+                max_steps=sub_max_steps,
+            )
+        else:
+            registry = ToolRegistry(ALL_TOOLS)
         agent = ReActAgent(
             llm=_make_llm(provider), tools=registry,
             system_prompt=system_prompt, max_steps=max_steps,
@@ -269,18 +289,23 @@ def _one_run(task: dict, trial: int, system_prompt: str, provider: str,
         outcome = agent.run(task["prompt"])
     except Exception as exc:  # noqa: BLE001 - keep the sweep going
         with _PRINT_LOCK:
-            print(f"  {task['id']:<16} t{trial} ERROR: {exc}")
+            print(f"  {task['id']:<16} t{trial} ERROR: {exc}", flush=True)
         return {
             "task_id": task["id"], "trial": trial, "error": str(exc),
             "exact_sequence_match": False, "answer_ok": False,
             "failure_kind": "error", "step_recall": 0.0, "extra_calls": 0,
-            "triggers": task["_triggers"],
+            "delegate_calls": len(call_log), "triggers": task["_triggers"],
         }
 
-    called = [
-        (step.get("action") or {}).get("name")
-        for step in outcome.trajectory if step.get("action")
-    ]
+    if hierarchical:
+        # Flatten every specialist's own tool calls, in delegation order --
+        # the same metric the flat conditions use, kept apples-to-apples.
+        called = [n for entry in call_log for n in entry["called_tools"]]
+    else:
+        called = [
+            (step.get("action") or {}).get("name")
+            for step in outcome.trajectory if step.get("action")
+        ]
     exact = called == expected
     answer_ok = all(
         s.lower() in outcome.answer.lower()
@@ -294,13 +319,15 @@ def _one_run(task: dict, trial: int, system_prompt: str, provider: str,
         print(f"  {task['id']:<16} t{trial} seq={'ok' if exact else 'X ':<2} "
               f"ans={'ok' if answer_ok else 'X ':<2} {kind:<6} "
               f"recall={recall:.2f} {len(called)}/{len(expected)}"
-              f"{'  missing=' + ','.join(missing) if missing else ''}")
+              f"{f'  deleg={len(call_log)}' if hierarchical else ''}"
+              f"{'  missing=' + ','.join(missing) if missing else ''}", flush=True)
 
     if delay:
         time.sleep(delay)
     return {
         "task_id": task["id"], "trial": trial,
         "triggers": task["_triggers"],
+        "delegate_calls": len(call_log),
         "expect_tool_sequence": expected,
         "called_sequence": called,
         "exact_sequence_match": exact,
@@ -326,9 +353,11 @@ def run_condition(
     jobs = [(t, k) for t in tasks for k in range(repeat)]
     rows: list[dict] = []
     started = time.time()
+    is_hier = name in HIERARCHICAL
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [
-            pool.submit(_one_run, t, k, system_prompt, provider, max_steps, delay)
+            pool.submit(_one_run, t, k, system_prompt, provider, max_steps,
+                        delay, is_hier)
             for t, k in jobs
         ]
         for fut in as_completed(futures):
@@ -381,6 +410,9 @@ def summarize(name: str, system_prompt: str, rows: list[dict]) -> dict:
     print(f"  mean step recall          : {mean_recall:.3f}")
     print(f"  final-answer accuracy     : {answers}/{total} = {answers / total:.1%}")
     print(f"  failure kinds             : {dict(kinds)}   extra calls: {extra_total}")
+    delegs = [r.get("delegate_calls", 0) for r in rows]
+    if any(delegs):
+        print(f"  mean delegations per run  : {sum(delegs) / len(delegs):.2f}")
     print("  by trigger class:")
     for tag, v in trigger_stats.items():
         print(f"    {tag:<24} {v['exact']:>4}/{v['n']:<4} = {v['accuracy']:>6.1%}"
