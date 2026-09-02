@@ -14,9 +14,10 @@ failure, from free to expensive.
                               completeness rule; nothing else changed
     fewshot                   instruction + two worked examples that execute
                               a redundant step
-    hierarchical              main agent + 5 specialist subagents; the model
-                              is told nothing, its tool surface is shrunk
-    hierarchical_instruction  both, to see whether they stack
+    hierarchical_bare         main agent + 5 specialists, with the shipped
+                              specialist prompt's anti-skip sentence removed
+    hierarchical              the same, with the shipped specialist prompt
+    hierarchical_fewshot      the same, plus a worked example
 
 Scoring per run
 ---------------
@@ -42,7 +43,12 @@ benchmarks/intervention_ladder/ and reports/intervention-ladder-evaluation.md
 Usage
 -----
     python examples/intervention_ladder_test.py            # Test-A, k=1
-    python examples/intervention_ladder_test.py         --tasks examples/gen_tasks_8step.json         --conditions baseline instruction fewshot hierarchical         --repeat 3 --workers 10 --max-steps 20 --dump results.json
+
+    python examples/intervention_ladder_test.py \
+        --tasks examples/gen_tasks_8step.json \
+        --conditions baseline instruction fewshot \
+                     hierarchical_bare hierarchical hierarchical_fewshot \
+        --repeat 3 --workers 10 --max-steps 20 --dump results.json
 """
 
 from __future__ import annotations
@@ -133,7 +139,7 @@ collapsed just because the answer is predictable."""
 
 # --- specialist prompts, for the hierarchical conditions -------------------
 #
-# A 15-task diagnostic (see INTERVENTION_LADDER_RESULTS.md) localised every
+# A 15-task diagnostic (see INTERVENTION_LADDER.md) localised every
 # skipped step in the hierarchical arm: in 4/4 cases the tool's group HAD been
 # delegated to and the specialist simply did not call it. The main agent never
 # under-delegated. So the specialist prompt, not MAIN_SYSTEM_PROMPT, is the
