@@ -110,16 +110,22 @@ from agent import (
     RunBudget,
     ToolOutputGuard,
     ToolRegistry,
-    ToolDispatcher,
-    FORCED_REFLECTION_PROMPT,
-    REFLECT_AFTER_FAILURE_STATE_KEY,
-    is_failure_observation,
     RequestLoggingMiddleware,
     bind_log_context,
     configure_logging,
     get_logger,
     log_event,
     tool,
+)
+from agent.trigger.events import (
+    ERROR,
+    REFLECTION,
+    RUN_COMPLETED,
+    SUSPENDED,
+    TEXT,
+    THINK_COMPLETED,
+    THINK_STARTED,
+    TOOL_COMPLETED,
 )
 from agent.trigger.react_loop import SUSPENDED_STOP_REASON
 from app.config import load_agent_config, retry_policy
@@ -1488,27 +1494,20 @@ async def stream(
         extra_context_providers=[session_provider] if session_provider else None,
         attach_rag=plan.needs_retrieval,
     )
-    llm = agent.llm
     leader_registry = agent.tools
 
     async def event_stream() -> AsyncGenerator[str, None]:
-        from agent.state.context import ExecutionContext
-
-        ctx = ExecutionContext(max_steps=agent.max_steps, max_tokens=agent.max_tokens)
-        ctx.add_message("system", agent.system_prompt)
-        for provider in agent.context_providers:
-            for message in await asyncio.to_thread(provider.prepare, task):
-                if message.get("content"):
-                    ctx.add_message(str(message.get("role", "system")), str(message["content"]))
-        ctx.add_message("user", task)
-        dispatcher = ToolDispatcher(
-            leader_registry,
-            max_retries=CONFIG.react_loop.max_tool_retries,
-            source_failure_hint_threshold=CONFIG.react_loop.source_failure_hint_threshold,
-        )
+        # No ExecutionContext, no dispatcher, no think/act loop here any
+        # more: the run is ReActLoop.aiter_run() and this endpoint only
+        # forwards its events. Everything this used to set up by hand --
+        # and get subtly wrong, see BUGS.md #22 -- now comes from the one
+        # implementation POST /api/run also uses.
         stop_reason = "max_steps"
+        steps = tokens = 0
         root_run_id = ""
         final_answer: Optional[str] = None
+        suspended_run_id: Optional[str] = None
+        result = None
 
         # Persist the question the moment the run starts, not after it
         # finishes — a disconnect (e.g. the client refreshing mid-stream) or
@@ -1563,48 +1562,58 @@ async def stream(
                     return
 
             with orchestrator.leader_scope() as root_run_id:
-                with bind_log_context(run_id=ctx.run_id, agent_name="leader"):
-                    stream_started = time.perf_counter()
-                    log_event(
-                        logger,
-                        logging.INFO,
-                        "agent.stream.started",
-                        task_chars=len(task),
-                        max_steps=agent.max_steps,
-                        tool_count=len(leader_registry),
-                    )
-                    yield _sse("start", {
-                        "task": task,
-                        "tools": leader_registry.names(),
-                        "root_run_id": root_run_id,
-                        "conversation_id": conversation_id,
-                    })
+                stream_started = time.perf_counter()
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "agent.stream.started",
+                    task_chars=len(task),
+                    max_steps=agent.max_steps,
+                    tool_count=len(leader_registry),
+                )
+                yield _sse("start", {
+                    "task": task,
+                    "tools": leader_registry.names(),
+                    "root_run_id": root_run_id,
+                    "conversation_id": conversation_id,
+                })
 
-                    async for payload in _stream_leader_steps(
-                        task=task,
-                        agent=agent,
-                        llm=llm,
-                        registry=leader_registry,
-                        dispatcher=dispatcher,
-                        ctx=ctx,
-                    ):
-                        if payload[0] == "__stop__":
-                            stop_reason = payload[1]["stop_reason"]
-                        else:
-                            if payload[0] == "answer":
-                                final_answer = payload[1]["text"]
-                            yield _sse(payload[0], payload[1])
+                async for name, data in _stream_leader_steps(task=task, agent=agent):
+                    if name == "__stop__":
+                        stop_reason = data["stop_reason"]
+                        steps, tokens = data["steps"], data["tokens"]
+                        result = data.get("result")
+                        continue
+                    if name == "answer":
+                        final_answer = data["text"]
+                    if name == "suspended":
+                        # Announced here, but the resumable run_id is only
+                        # known once the run has actually finished
+                        # suspending and produced its checkpoint -- a second
+                        # "suspended" event carrying it follows below.
+                        continue
+                    yield _sse(name, data)
 
-                    log_event(
-                        logger,
-                        logging.INFO,
-                        "agent.stream.completed",
-                        success=stop_reason == "finished",
-                        stop_reason=stop_reason,
-                        steps=len(ctx.steps),
-                        tokens=ctx.tokens_used,
-                        elapsed_ms=round((time.perf_counter() - stream_started) * 1000, 2),
-                    )
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "agent.stream.completed",
+                    success=stop_reason == "finished",
+                    stop_reason=stop_reason,
+                    steps=steps,
+                    tokens=tokens,
+                    elapsed_ms=round((time.perf_counter() - stream_started) * 1000, 2),
+                )
+
+            if stop_reason == SUSPENDED_STOP_REASON and result is not None:
+                suspended_run_id = await asyncio.to_thread(
+                    _save_checkpoint, task, result, conversation_id
+                )
+                yield _sse("suspended", {
+                    "run_id": suspended_run_id,
+                    "pending_job_ids": list(result.pending_job_ids),
+                    "resume_url": f"/api/runs/{suspended_run_id}/resume",
+                })
 
             # The question was already persisted as soon as the run started
             # (see above). Only a run that actually produced a final answer
@@ -1634,11 +1643,12 @@ async def stream(
                 root_run_id, include_trajectory=True
             )
             yield _sse("done", {
-                "steps": len(ctx.steps),
-                "tokens": ctx.tokens_used + sum(item["tokens"] for item in subagents),
+                "steps": steps,
+                "tokens": tokens + sum(item["tokens"] for item in subagents),
                 "success": stop_reason == "finished",
                 "stop_reason": stop_reason,
                 "root_run_id": root_run_id,
+                "run_id": suspended_run_id,
                 "subagents": subagents,
                 "conversation_id": conversation_id,
             })
@@ -1657,21 +1667,6 @@ async def stream(
     )
 
 
-def _offered_schemas_for(agent, registry: ToolRegistry, ctx) -> list:
-    """Tool schemas for one streaming think step, honouring the selector."""
-
-    from agent.trigger.react_loop import _selection_query, _tools_used
-    from agent.trigger.tool_router import filtered_schemas
-
-    selector = getattr(agent, "tool_selector", None)
-    if selector is None:
-        return registry.schemas()
-    selection = selector.select(
-        registry, _selection_query(ctx), used=_tools_used(ctx)
-    )
-    return filtered_schemas(registry, selection)
-
-
 async def _stream_direct_answer(plan: RunPlan):
     """Stream one tool-less answer for a ``direct``-routed request.
 
@@ -1684,242 +1679,156 @@ async def _stream_direct_answer(plan: RunPlan):
     identical on both paths.
     """
 
-    from agent.state.context import ExecutionContext
-
-    registry = ToolRegistry([])
     direct_agent = ReActAgent(
         llm=_build_llm(),
-        tools=registry,
+        tools=ToolRegistry([]),
         system_prompt=DIRECT_SYSTEM_PROMPT,
         max_steps=CONFIG.router.direct_max_steps,
         max_tokens=CONFIG.leader.max_tokens,
         agent_name="direct",
     )
-    ctx = ExecutionContext(
-        max_steps=direct_agent.max_steps, max_tokens=direct_agent.max_tokens
-    )
-    ctx.add_message("system", DIRECT_SYSTEM_PROMPT)
-    ctx.add_message("user", plan.task)
 
     collected: List[tuple] = []
     answer: Optional[str] = None
-    with bind_log_context(run_id=ctx.run_id, agent_name="direct"):
-        async for event, data in _stream_leader_steps(
-            task=plan.task,
-            agent=direct_agent,
-            llm=direct_agent.llm,
-            registry=registry,
-            dispatcher=ToolDispatcher(registry),
-            ctx=ctx,
-        ):
-            if event == "__stop__":
-                continue
-            if event == "answer":
-                answer = data["text"]
-            collected.append((event, data))
+    stats = {"steps": 0, "tokens": 0}
+    async for event, data in _stream_leader_steps(task=plan.task, agent=direct_agent):
+        if event == "__stop__":
+            stats = {"steps": data["steps"], "tokens": data["tokens"]}
+            continue
+        if event == "answer":
+            answer = data["text"]
+        collected.append((event, data))
 
-        if wants_escalation(answer):
-            log_event(
-                logger,
-                logging.INFO,
-                "router.route.escalated",
-                reason="direct answer requested tools",
-                task_chars=len(plan.task),
-            )
-            return
-
+    if wants_escalation(answer):
         log_event(
             logger,
             logging.INFO,
-            "router.route.direct_answered",
-            steps=len(ctx.steps),
-            tokens=ctx.tokens_used,
+            "router.route.escalated",
+            reason="direct answer requested tools",
+            task_chars=len(plan.task),
         )
+        return
+
+    log_event(
+        logger,
+        logging.INFO,
+        "router.route.direct_answered",
+        steps=stats["steps"],
+        tokens=stats["tokens"],
+    )
 
     for payload in collected:
         yield payload
-    yield "__stats__", {"steps": len(ctx.steps), "tokens": ctx.tokens_used}
+    yield "__stats__", stats
 
 
-async def _stream_leader_steps(*, task, agent, llm, registry, dispatcher, ctx):
-    """Yield the existing streaming ReAct events for one active Leader scope."""
+async def _stream_leader_steps(*, task, agent):
+    """Translate one run's events into the SSE pairs the playground reads.
 
-    stop_reason = "max_steps"
-    for step_idx in range(agent.max_steps):
-        if ctx.over_budget():
-            stop_reason = "budget"
-            yield "error", {"message": f"Budget exceeded: {ctx.budget_reason()}"}
-            break
+    This used to be a hand-written second copy of the ReAct loop -- the only
+    way to observe a run *while* it happened. The copies drifted (BUGS.md
+    #22): tool dispatch blocked the event loop, ``SuspendRun`` escaped
+    uncaught with no checkpoint saved, and the reported step count was
+    always zero because this loop counted with a local variable and never
+    created a ``Step``.
 
-        # A failed tool call in the previous step's ACT phase set this --
-        # force this THINK call to run with no tools offered so the model
-        # must respond in plain text instead of immediately firing off
-        # another tool call. Mirrors ReActLoop._think_node's
-        # REFLECT_AFTER_FAILURE_STATE_KEY handling; see that module's
-        # docstring for why a soft hint in the observation text wasn't
-        # enough on its own.
-        reflect = ctx.state.pop(REFLECT_AFTER_FAILURE_STATE_KEY, False)
+    All of that is gone because none of it lives here any more. The run is
+    ``ReActLoop.aiter_run()``; this function only renames its events. Both
+    endpoints now execute the same state machine and differ in transport,
+    which is the only thing they were ever meant to differ in.
 
-        # --- THINK phase with streaming ---
-        yield "think_start", {"step": step_idx}
-        full_content = ""
-        tool_calls = []
-        # Same narrowing the non-streaming loop applies (see
-        # ReActLoop._offered_schemas); kept in step here rather than
-        # skipped, so the two paths cannot drift into offering the model
-        # different tool sets for the same request.
-        offered = None if reflect else _offered_schemas_for(agent, registry, ctx)
-        llm_started = time.perf_counter()
-        log_event(
-            logger,
-            logging.DEBUG,
-            "llm.stream.started",
-            step=step_idx,
-            message_count=len(ctx.messages),
-            tool_count=0 if offered is None else len(offered),
-            registry_size=len(registry),
-            forced_reflection=reflect,
-        )
+    Yields ``(event, data)`` pairs, ending with ``("__stop__", {...})``
+    carrying the finished :class:`AgentResult` under ``result``.
+    """
 
-        try:
-            async for event in llm.astream(
-                agent.short_term.manage(ctx.messages),
-                tools=offered,
-            ):
-                if event["type"] == "text":
-                    full_content += event["data"]
-                    yield "text", {"step": step_idx, "token": event["data"]}
-                elif event["type"] == "tool_call" and not reflect:
-                    tool_calls.append(event["data"])
-                    yield "tool_call", {"step": step_idx, "tool": event["data"]}
-        except Exception:
-            log_event(
-                logger,
-                logging.ERROR,
-                "llm.stream.failed",
-                step=step_idx,
-                elapsed_ms=round((time.perf_counter() - llm_started) * 1000, 2),
-                exc_info=True,
-            )
-            raise
+    reported_error = False
 
-        log_event(
-            logger,
-            logging.INFO,
-            "llm.stream.completed",
-            step=step_idx,
-            tool_call_count=len(tool_calls),
-            output_chars=len(full_content),
-            elapsed_ms=round((time.perf_counter() - llm_started) * 1000, 2),
-        )
+    async for event in agent.aiter_run(task):
+        kind, data = event.kind, event.data
 
-        ctx.add_tokens(estimate_tokens_simple(full_content))
+        if kind == THINK_STARTED:
+            yield "think_start", {"step": data["step"]}
 
-        if reflect:
-            # No tools were offered, so this can only be a plain-text
-            # reasoning turn -- never a final answer. Record it and loop
-            # straight back to a normal (tool-enabled) think step.
-            reasoning = full_content.strip() or "(no reasoning provided)"
-            ctx.add_message("assistant", reasoning)
-            yield "reflection", {"step": step_idx, "text": reasoning}
-            continue
+        elif kind == TEXT:
+            yield "text", data
 
-        # No tool calls → final answer.
-        if not tool_calls:
-            answer = full_content.strip()
-            ctx.add_message("assistant", answer)
-            stop_reason = "finished"
-            yield "answer", {"step": step_idx, "text": answer}
-            break
-
-        # --- ACT phase ---
-        yield "act_start", {
-            "step": step_idx,
-            "tools": [item["name"] for item in tool_calls],
-        }
-
-        from agent.llm import ToolCall as TCT
-
-        tc_objects = [
-            TCT(id=item["id"], name=item["name"], arguments=item["arguments"])
-            for item in tool_calls
-        ]
-        ctx.add_message(
-            "assistant",
-            full_content,
-            tool_calls=[
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": json.dumps(tc.arguments),
-                    },
+        elif kind == THINK_COMPLETED:
+            calls = data.get("tool_calls") or []
+            for call in calls:
+                yield "tool_call", {"step": data["step"], "tool": call}
+            if calls:
+                yield "act_start", {
+                    "step": data["step"],
+                    "tools": [call["name"] for call in calls],
                 }
-                for tc in tc_objects
-            ],
-        )
 
-        fatal_error = None
-        any_failed = False
-        for tc in tc_objects:
-            try:
-                result = dispatcher.dispatch(ctx, tc.name, tc.arguments)
-            except FatalToolError as exc:
-                fatal_error = str(exc)
-                stop_reason = "fatal_tool_error"
-                yield "error", {
-                    "step": step_idx,
-                    "type": "fatal_tool_error",
-                    "message": fatal_error,
-                }
-                break
-            scan = OUTPUT_GUARD.scan(result)
-            if scan.suspicious:
-                result = scan.sanitized
-            if is_failure_observation(result):
-                any_failed = True
-            ctx.add_message("tool", result, tool_call_id=tc.id, name=tc.name)
+        elif kind == REFLECTION:
+            yield "reflection", data
+
+        elif kind == TOOL_COMPLETED:
             yield "tool_result", {
-                "step": step_idx,
-                "tool": tc.name,
-                "result": result,
+                "step": data["step"],
+                "tool": data["name"],
+                "result": data["observation"],
             }
-        if fatal_error is not None:
-            break
-        if any_failed:
-            # See REFLECT_AFTER_FAILURE_STATE_KEY above: forces the next
-            # THINK call to run tool-less.
-            ctx.add_message("user", FORCED_REFLECTION_PROMPT)
-            ctx.state[REFLECT_AFTER_FAILURE_STATE_KEY] = True
-            log_event(
-                logger, logging.INFO, "reflection.forced", tool_name=tc_objects[0].name
-            )
-    else:
-        # The for loop ran out of iterations without ever `break`-ing (no
-        # "finished"/budget/fatal_tool_error case fired) -- stop_reason is
-        # still its initial "max_steps" default. Unlike those other stop
-        # paths, this one never yielded an "error" event, so the frontend
-        # trace just went quiet with no visible outcome at all -- a run
-        # that genuinely ran to its full step budget could look exactly
-        # like a dropped connection. See README's Structured logging /
-        # multi-agent notes for the case this was found from.
-        yield "error", {
-            "message": f"Stopped after {agent.max_steps} steps without a final answer "
-            "(max_steps reached).",
-        }
 
-    yield "__stop__", {"stop_reason": stop_reason}
+        elif kind == SUSPENDED:
+            # New on this path. Previously SuspendRun propagated out of the
+            # generator, so the stream died mid-run with no run id to resume
+            # and the jobs it was waiting on were stranded.
+            yield "suspended", data
+
+        elif kind == ERROR:
+            reported_error = True
+            yield "error", data
+
+        elif kind == RUN_COMPLETED:
+            if data["success"]:
+                yield "answer", {"text": data["answer"]}
+            elif data["stop_reason"] != SUSPENDED_STOP_REASON and not reported_error:
+                # Budget, loop detection, cancellation and "ran out of steps
+                # without answering" all end the run without any node having
+                # emitted an error. Saying so explicitly matters: a run that
+                # genuinely exhausted its budget used to look exactly like a
+                # dropped connection from the frontend's side.
+                yield "error", {"message": _stop_reason_message(data, agent)}
+            yield "__stop__", data
+
+
+def _stop_reason_message(data: dict, agent) -> str:
+    """A sentence a user can act on, for a run that stopped without answering.
+
+    The stop reasons themselves now come from ``ReActLoop`` rather than
+    being invented here, so this only has to render them -- one vocabulary
+    for both endpoints instead of the streaming path's own bare
+    ``"max_steps"`` versus ``/api/run``'s ``"budget: max_steps (N) reached"``.
+    """
+
+    stop_reason = str(data.get("stop_reason", ""))
+    detail = stop_reason.split(":", 1)[-1].strip()
+
+    if "max_steps" in stop_reason:
+        return (
+            f"Stopped after {data.get('steps', agent.max_steps)} steps without "
+            f"a final answer (max_steps reached)."
+        )
+    if stop_reason.startswith("budget"):
+        return f"Budget exceeded: {detail}"
+    if stop_reason.startswith("loop_detected"):
+        return f"Stopped making progress: {detail}."
+    if stop_reason == "cancelled":
+        return "Run cancelled."
+    if stop_reason == "llm_unavailable":
+        return "The model provider was unreachable after retries."
+    if stop_reason == "no_answer":
+        return "The run ended without producing a final answer."
+    return f"Run stopped: {stop_reason or 'unknown reason'}."
 
 
 # -- helpers ---------------------------------------------------------------
 def _sse(event: str, data: dict) -> str:
     """Format a dict as an SSE message."""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-
-def estimate_tokens_simple(text: str) -> int:
-    return max(1, len(text or "") // 4)
 
 
 # ---------------------------------------------------------------------------

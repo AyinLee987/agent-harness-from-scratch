@@ -20,7 +20,7 @@ Example::
 from __future__ import annotations
 
 import threading
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, AsyncIterator, Dict, Iterator, Optional, Sequence
 
 from .compression import ContextCompressor
 from .context import ContextProvider
@@ -29,6 +29,7 @@ from .memory import MemoryManager
 from .safety import ToolOutputGuard
 from .state.memory import LongTermMemory, ShortTermMemory
 from .tools import ToolRegistry
+from .trigger.events import RunEvent
 from .trigger.react_loop import DEFAULT_SYSTEM_PROMPT, AgentResult, ReActLoop
 from .trigger.tool_router import ToolSelector
 
@@ -98,6 +99,37 @@ class ReActAgent:
         job -- see :meth:`agent.trigger.ReActLoop.run`.
         """
         return self._loop.run(
+            task, cancellation_event=cancellation_event, resume_from=resume_from
+        )
+
+    def iter_run(
+        self,
+        task: str,
+        cancellation_event: Optional[threading.Event] = None,
+        resume_from: Optional[Dict[str, Any]] = None,
+    ) -> Iterator[RunEvent]:
+        """Run ``task``, yielding a :class:`RunEvent` as each thing happens.
+
+        The generator's return value is the :class:`AgentResult`. See
+        :meth:`agent.trigger.ReActLoop.iter_run`.
+        """
+        return self._loop.iter_run(
+            task, cancellation_event=cancellation_event, resume_from=resume_from
+        )
+
+    def aiter_run(
+        self,
+        task: str,
+        cancellation_event: Optional[threading.Event] = None,
+        resume_from: Optional[Dict[str, Any]] = None,
+    ) -> AsyncIterator[RunEvent]:
+        """:meth:`iter_run` for a caller that owns an event loop.
+
+        The final :class:`AgentResult` arrives on the terminating
+        ``run_completed`` event's ``result`` key, since an async generator
+        cannot return a value. See :meth:`agent.trigger.ReActLoop.aiter_run`.
+        """
+        return self._loop.aiter_run(
             task, cancellation_event=cancellation_event, resume_from=resume_from
         )
 

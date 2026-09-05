@@ -1,10 +1,19 @@
 # Unifying the execution core (BUGS.md #22)
 
-Plan for the one item from the 2026-09-05 external review that was **not**
-patched, because patching it is the wrong move. Everything else from that
-review is fixed and covered by `tests/test_review_fixes.py`.
+Why `/api/stream` stopped being a second implementation of the ReAct loop,
+and how. Written as a plan; kept as the rationale.
 
-Status: **not started.** This document is the design, not a record.
+**Status: done.** All six steps landed, 410 tests pass, and the outcomes are
+recorded at the bottom. Regression tests live in
+`tests/test_unified_execution.py`; the defect record is BUGS.md #22 (plus
+#23 and #24, both found while doing this).
+
+One correction is folded in below rather than hidden: step 3 originally
+read "add `aiter_run()`, sharing the node implementations", which is not a
+thing you can do — a `def` node containing a blocking call cannot be shared
+with a driver that needs to `await` it. Lifting the I/O out of the nodes is
+what actually makes one node body serve both drivers, and it is the load-
+bearing step.
 
 ---
 
@@ -255,3 +264,59 @@ Two failure modes to avoid:
 - **Skipping step 3 and duplicating `_act_node` for the async driver.** It is
   the shortest path to a working `aiter_run()` and it re-creates the exact
   defect this whole document exists to remove, one layer lower down.
+
+---
+
+## 6. What actually happened
+
+Landed 2026-09-05 in the order above. Steps 1-3.5 each went in with the
+whole existing suite passing and **no test changed** — that was the
+acceptance criterion, and it held.
+
+### Measured
+
+| | before | after |
+|---|---|---|
+| 30ms coroutine, during a 300ms tool | woke at **342ms** | woke at **35ms** |
+| suspended run | `SuspendRun` escaped uncaught, 0 checkpoints | `suspended` event + resumable `run_id` |
+| 2 model calls | `done.steps = 0` | `done.steps = 2` |
+| ~1000-token prompt | counted as **5** tokens | counted |
+| `app/server.py` | — | ~250 lines shorter (net) |
+
+### Gained without asking for it
+
+Both because the streaming path stopped being a copy:
+
+- **Loop detection.** A model repeating one identical call used to run to
+  the full step budget on `/api/stream`; it now stops the same way it does
+  on `/api/run`.
+- **One `stop_reason` vocabulary.** The streaming loop invented a bare
+  `"max_steps"`; it now reports `budget: max_steps (100) reached`, the same
+  string the JSON endpoint has always returned.
+
+### Changed along the way
+
+- `ManageContext` was added as a third effect. It looks like bookkeeping
+  and is not: `ShortTermMemory.manage()` summarizes the overflow window
+  with a *model call*, so leaving it inline would have left the async
+  driver with a blocking provider call it could not see — the exact failure
+  the effect boundary exists to prevent, in the one place it is easy to
+  forget.
+- `Usage.estimated` was added. A streamed reply carries no usage block from
+  any provider here, so both halves are estimated; reporting an estimate is
+  fine, reporting it as measured is not.
+- Two defects surfaced and were fixed: the graph's 200-transition safety
+  net sat *below* the shipped 100-step budget (BUGS.md #23), and six tests
+  had been making real, billed API calls on any machine with a populated
+  `.env` (BUGS.md #24).
+
+### Not done
+
+- `/api/stream` emits a `suspended` event the playground does not render
+  yet. It is ignored rather than mishandled (the frontend's event switch
+  has no `default`), so a suspended run currently shows as a run that ended
+  — better than the stream dying mid-run, and still worth a UI change.
+- The intentionally-live tests (`test_tool_scaling*`,
+  `test_hierarchical_agent`) still run by default wherever a key is
+  configured. Making them opt-in is a change to a documented decision, not
+  a defect, so it was left alone.

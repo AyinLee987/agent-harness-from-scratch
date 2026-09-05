@@ -190,6 +190,25 @@ limit (#21). If a ceiling cannot be exact — `max_tokens` cannot, since
 nothing knows the completion size before the call — say so where it is
 enforced and bound the error, rather than leaving the gap unstated.
 
+## 8.0 A node yields its I/O; it does not perform it
+
+`ReActLoop`'s graph nodes are generators. Everything they do is pure except
+the calls they need made, which they `yield` as an effect (`CallModel`,
+`CallTool`, `ManageContext` in `agent/trigger/events.py`) and get the result
+of back. The driver decides how: block on it, or `await
+asyncio.to_thread(...)` from an event loop.
+
+This is not decoration. `/api/run` and `/api/stream` need the same state
+machine driven two different ways, and a `def` cannot `await` — so without
+the effect boundary the only options are two copies of every node (which is
+what BUGS.md #22 was) or an async-only loop (which would push `async`
+through `ToolRegistry` and every tool anyone writes).
+
+So: if you add a call inside a node, add it as an effect. The one that is
+easy to miss is a call that does not look like I/O —
+`ShortTermMemory.manage()` summarizes with a *model call*, which is why
+`ManageContext` exists.
+
 ## 8.1 State transitions belong in the store, not above it
 
 A guard of the shape `x = store.get(id)` / `if x.is_final: return` /

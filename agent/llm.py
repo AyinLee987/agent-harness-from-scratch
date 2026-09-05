@@ -73,10 +73,18 @@ def parse_tool_arguments(raw: Optional[str]) -> Any:
 
 @dataclass
 class Usage:
-    """Token accounting for a single LLM call."""
+    """Token accounting for a single LLM call.
+
+    ``estimated`` marks numbers this repo computed rather than read from the
+    provider. Streaming responses are the case that matters: most providers
+    send no usage block with a stream, so the alternative to estimating is
+    reporting zero — and a budget that reads zero is not a budget. Reporting
+    an estimate is fine; reporting it as measured is not.
+    """
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    estimated: bool = False
 
     @property
     def total_tokens(self) -> int:

@@ -966,6 +966,8 @@ web/
 - [x] Two model tiers (strong for the loop, cheap for classification/summarization)
 - [x] Long-running tools: job handles, durable job store, idempotency, heartbeat, cooperative cancel
 - [x] Suspend/resume: a run waiting on a job checkpoints to SQLite and resumes via `POST /api/runs/{id}/resume`
+- [x] One execution core behind both endpoints — `/api/run` drains `ReActLoop.iter_run()`, `/api/stream` forwards it as SSE (`docs/unified-execution-core.md`, BUGS.md #22)
+- [ ] Render the `suspended` SSE event in the playground (currently emitted and ignored)
 - [ ] Answer-time citation verification (structural `[E#]` check, then sentence-level attribution)
 - [ ] Suspend/resume across delegation (a suspended Leader currently loses its in-flight Workers)
 - [ ] Async multi-agent orchestration (Worker dispatch currently runs via `asyncio.to_thread`, not a native async tool loop)
@@ -1147,7 +1149,8 @@ frontend and never back into any LLM prompt); the Playground renders it as a
 `🔧 tool ✓ · tool ✗ · ...` line on each Worker's card.
 
 **A run that exhausts its step budget without answering** (`stop_reason:
-"max_steps"`) now yields a visible `error` SSE event before `done`. It
+"budget: max_steps (N) reached"`) now yields a visible `error` SSE event
+before `done`. It
 previously didn't — unlike a budget-exceeded or fatal-tool-error stop, both
 of which already surfaced one — so a run that legitimately ran to its full
 step budget looked identical, from the frontend, to a dropped connection: no

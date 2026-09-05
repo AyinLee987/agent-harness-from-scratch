@@ -443,16 +443,17 @@ Each entry:
 
 # External review, 2026-09-05
 
-Entries #9-#22 all come from one external code review (an independent model
-was pointed at the working tree and asked to find defects). Every claim in
+Entries #9-#22 come from one external code review (an independent model was
+pointed at the working tree and asked to find defects); #23 and #24 were
+found while fixing #22. Every claim in
 that report was re-derived here before being acted on — each has a standalone
 repro that ran against the pre-fix code, and the repros are what the
 regression tests were written from. Nothing was taken on the report's word.
 
 Two things worth recording about the review itself. It grouped what are
 really *three symptoms of one root cause* (the SSE endpoint being a
-hand-written copy of `ReActLoop`) as three separate findings, so the headline
-count was higher than the number of independent defects. And two of its
+hand-written copy of `ReActLoop`, now #22) as three separate findings, so the
+headline count was higher than the number of independent defects. And two of its
 findings were correctly *observed* but wrongly *framed* — see #21, which is a
 contract that needed stating rather than behaviour that needed changing, and
 #20, where the skip logic was defensible and the return value was not.
@@ -958,18 +959,142 @@ contract that needed stating rather than behaviour that needed changing, and
   the SSE path does not have.
   The structural problem is that streaming is an *output* concern being
   solved by duplicating *control flow*.
-- **Fix**: not applied. This is a refactor, not a patch, and patching the
-  three symptoms independently would produce a fourth copy of the logic to
-  keep in sync. The plan is to make `ReActLoop` emit a run-event stream that
-  both endpoints consume — `/api/run` by draining it, `/api/stream` by
-  forwarding it as SSE — so the two differ only in transport. Tool dispatch
-  moves to `asyncio.to_thread`, `SuspendRun` becomes a `suspended` event
-  carrying the run id, and steps/usage come from the single
-  `ExecutionContext` both paths already have. Full design in
+- **Fix**: applied, as the refactor it needed rather than three patches
+  (patching the symptoms separately would have produced a fourth copy of the
+  logic to keep in sync). `ReActLoop` now emits a run-event stream both
+  endpoints consume, and the ~170-line hand-written loop in `app/server.py`
+  is gone. Six steps, the first four behaviour-preserving by construction —
+  each landed with the whole existing suite passing and **no test changed**:
+
+  1. `agent/trigger/events.py` — `RunEvent` plus the effect vocabulary.
+  2. `StateGraph.iter_steps()` yields `(name, node)` and takes the resulting
+     state back, so the *caller* owns node execution while the graph keeps
+     owning routing. `compile()` is now that plus a two-line runner, so the
+     two cannot disagree about edges.
+  3. Nodes became generators. This is the step that makes the whole thing
+     work and the one the original plan hand-waved ("share the node
+     implementations"): `_act_node` contained a blocking
+     `dispatcher.dispatch(...)`, an async driver needs `await` there, and a
+     `def` cannot `await`. So a node no longer performs its own I/O — it
+     `yield`s `CallModel` / `CallTool` / `ManageContext` and is handed the
+     result back. One node body, drivable by either driver. Exceptions are
+     `throw()`n back in, so each node's own `try/except` around its I/O
+     reads exactly as it did when the call was inline — which is where
+     `TransientLLMError` still becomes a graceful stop and `SuspendRun` still
+     becomes a checkpoint.
+     `ManageContext` covers the call that is easiest to forget:
+     `ShortTermMemory.manage()` summarizes the overflow window with a *model
+     call*, so leaving it in the node body would have left the async driver
+     with a blocking provider call it could not see.
+  4. `_drive` / `_adrive` (about fifteen lines each) plus `_perform` /
+     `_aperform`. The async side runs tool dispatch, context management,
+     context-provider preparation and memory writes in `asyncio.to_thread`.
+  5. `/api/stream` became a translator: `RunEvent` → `_sse(...)`.
+  6. Deleted the duplicate, including the cross-referencing comments that
+     existed only to warn that a copy existed. Their disappearance is the
+     real deliverable.
+
+  Measured after: the 300ms tool now delays a 30ms coroutine to **35ms**
+  (was 342ms); a suspending run emits a `suspended` event carrying a
+  `run_id` that `POST /api/runs/{run_id}/resume` accepts, with the
+  checkpoint saved before the event is sent; `steps` and `tokens` come from
+  the one `ExecutionContext` and a 4000-character prompt is counted rather
+  than reported as 5 tokens.
+
+  Two things the streaming path *gained* by no longer being a copy, neither
+  of which was in scope: loop detection (a model repeating one identical
+  call used to run to the full step budget there), and the same
+  `stop_reason` vocabulary as `POST /api/run` (it used to invent a bare
+  `"max_steps"` of its own).
+
+  `Usage.estimated` was added in the same change: a streamed reply carries no
+  usage block from any provider here, so both halves are estimated —
+  reporting an estimate is fine, reporting it as measured is not.
+
+  `app/server.py` is ~250 lines shorter net.
+- **Regression test**: `tests/test_unified_execution.py` — one per symptom
+  (`test_a_slow_tool_does_not_stall_the_event_loop`,
+  `test_a_streamed_run_that_suspends_says_so_and_saves_a_checkpoint`,
+  `test_the_streaming_path_reports_the_steps_it_actually_took`), plus the
+  properties that had to survive: `test_run_is_exactly_a_drain_of_iter_run`,
+  `test_the_sync_and_async_drivers_produce_the_same_run`, and
+  `test_events_pair_up_one_per_tool_call`. Plus
+  `test_the_streaming_path_now_detects_a_loop_too` in
+  `tests/test_server_stream_incomplete_run.py` for the capability it gained.
+- **Status**: Fixed. Design and rationale kept in
   `docs/unified-execution-core.md`.
-- **Regression test**: none yet. The three repros above are the shape to
-  port: an asyncio interleave measuring loop responsiveness during a slow
-  tool, a suspending tool asserting a `suspended` event and a saved
-  checkpoint, and a two-call run asserting `steps == 2` with the prompt
-  counted.
-- **Status**: Open, and the highest-value remaining item in this file.
+
+---
+
+## 23. The graph's transition cap fired before the step budget it was protecting
+
+- **Found**: 2026-09-05, while unifying the execution core (#22) — a
+  streaming run that should have reported `max_steps` reported
+  `max_transitions (200)` instead. Pre-existing on **both** paths, not
+  introduced by that work: `run()` has always driven the graph through
+  `compile()`, whose cap is the same 200.
+- **Symptom**: a long run stopped with
+  `stop_reason = "max_transitions (200)"` — a number about the graph engine,
+  not about the run. Nothing downstream could act on it: it is not a budget
+  reason, not a loop, not a failure anyone configured.
+- **Root cause**: `StateGraph.compile()`/`iter_steps()` take
+  `max_transitions=200`, a safety net against a graph that cannot terminate.
+  But a ReAct *step* costs two transitions (think, act) and three when a
+  tool failure forces a reflection turn, so 200 transitions is roughly 66
+  steps — and the shipped `leader.max_steps` is **100**. The engine's
+  safety net was therefore tighter than the budget it was supposed to be
+  protecting, and tripped first on any run that used its full allowance.
+  Nothing caught it because no test ran a long enough loop: `MockLLM`
+  answers within a couple of steps.
+- **Fix**: `ReActLoop._max_transitions()` derives the cap from the budget —
+  `max(200, max_steps * 4 + 20)` — and both `iter_run` and `aiter_run` pass
+  it. Computed per run rather than at construction, because `max_steps` is
+  writable (see BUGS.md #14). `ExecutionContext.over_budget()` remains the
+  authoritative guard; the graph cap is back to being what it was meant to
+  be, a net for a graph that cannot terminate at all.
+- **Regression test**:
+  `test_the_graph_transition_cap_never_fires_before_the_step_budget`
+  (`tests/test_unified_execution.py`) — a model that never answers, with
+  `max_steps=100`, must stop with `budget: max_steps (100) reached` and
+  exactly 100 steps.
+- **Status**: Fixed.
+
+---
+
+## 24. Six tests were spending real money on every local run
+
+- **Found**: 2026-09-05, immediately after running a manual SSE sanity check
+  that returned a real model's answer and a real `call_00_...` tool-call id.
+- **Symptom**: `app/server.py` calls `load_dotenv()` at import, and
+  `_auto_llm` selects DeepSeek the moment `DEEPSEEK_API_KEY` is present. So
+  on any machine with a populated `.env` — the developer's — any test
+  reaching a server endpoint without patching the model factory issued live,
+  billed API calls. It passed either way, so nothing pointed at it. The
+  external review's own run reported "340 passed, 5 skipped … no real model
+  was called" precisely because it had disabled `.env` loading; the same
+  suite here silently did the opposite.
+- **Root cause**: the guard was per-test discipline (`monkeypatch.setattr(
+  server, "_build_llm", ...)`) rather than a default. Discipline holds until
+  someone adds a test that does not know it needs it — which is exactly what
+  happened while writing #22's regression tests.
+- **Fix**: `tests/conftest.py` — an autouse fixture pointing the server's
+  model factories at `MockLLM` for every test. A test wanting a specific
+  fake still overrides it, since its own `monkeypatch` runs later and wins.
+  `_build_fast_llm` is patched to *delegate* to `_build_llm` rather than
+  returning its own `MockLLM`, mirroring the real `models.fast:
+  provider: auto` fallback — otherwise a test patching only `_build_llm`
+  would silently lose the fast tier, the exact trap that function's docstring
+  already warns about. (One test, `test_conversation_title_...`, caught this
+  during the fix.)
+  Deliberately narrow: the API keys are **not** unset. `test_tool_scaling*`
+  and `test_hierarchical_agent` are *intentionally* live — they measure a
+  real model's tool-selection accuracy, which no fake can stand in for — and
+  gate themselves on a key being present. Those are a deliberate choice to
+  spend money; this guards the accidental case.
+- **Regression test**: the fixture is the guard, and it is autouse, so it
+  applies to every test written from now on without anyone remembering it.
+- **Status**: Fixed. Worth noting separately: those intentional live tests
+  still run by default on any machine with a key configured, so a plain
+  `pytest` there costs money. Making them opt-in (a marker, or
+  `RUN_LIVE_LLM_TESTS=1`) is a reasonable follow-up but is a change to a
+  documented design decision, not a defect.

@@ -11,18 +11,19 @@ retry-once-then-fail handling of malformed tool calls.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from ..compression import ContextCompressor
 from ..context import ContextProvider
 from ..errors import FatalToolError
 from ..jobs.models import SuspendRun
-from ..llm import BaseLLM, LLMResponse, ToolCall, estimate_tokens
+from ..llm import BaseLLM, LLMResponse, ToolCall, Usage, estimate_tokens
 from ..memory import MemoryManager, RunCompletedEvent
 from ..observability import bind_log_context, get_logger, log_event, run_log_file
 from ..retry import TransientLLMError
@@ -31,6 +32,22 @@ from ..state.context import ExecutionContext, Step
 from ..state.memory import LongTermMemory, ShortTermMemory
 from ..tools import ToolRegistry
 from .dispatch import ToolDispatcher, is_failure_observation
+from .events import (
+    ERROR,
+    REFLECTION,
+    RUN_COMPLETED,
+    RUN_STARTED,
+    SUSPENDED,
+    TEXT,
+    THINK_COMPLETED,
+    THINK_STARTED,
+    TOOL_COMPLETED,
+    TOOL_STARTED,
+    CallModel,
+    CallTool,
+    ManageContext,
+    RunEvent,
+)
 from .graph import StateGraph
 from .tool_router import ToolSelector, filtered_schemas
 
@@ -50,8 +67,7 @@ DEFAULT_SYSTEM_PROMPT = (
 # on its own (a model mid-retry-spiral kept issuing tool calls straight
 # through it); withholding tools for one turn makes reflection mandatory
 # rather than hoped-for. See FORCED_REFLECTION_PROMPT and its use in
-# _act_node / _think_node below, and app/server.py's _stream_leader_steps
-# for the SSE-streaming duplicate of this same mechanism.
+# _act_node / _think_node below.
 REFLECT_AFTER_FAILURE_STATE_KEY = "__reflect_after_failure__"
 
 FORCED_REFLECTION_PROMPT = (
@@ -209,76 +225,64 @@ class ReActLoop:
                 already, and replaying them would inject a second copy of
                 the same retrieved evidence.
         """
-        if resume_from is not None:
-            ctx = ExecutionContext.restore(resume_from)
-        else:
-            ctx = ExecutionContext(max_steps=self.max_steps, max_tokens=self.max_tokens)
-            ctx.add_message("system", self.system_prompt)
-            for provider in self.context_providers:
-                for message in provider.prepare(task):
-                    role = str(message.get("role", "system"))
-                    content = str(message.get("content", ""))
-                    if content:
-                        ctx.add_message(role, content)
-            ctx.add_message("user", task)
+        generator = self.iter_run(
+            task, cancellation_event=cancellation_event, resume_from=resume_from
+        )
+        while True:
+            try:
+                next(generator)
+            except StopIteration as done:
+                return done.value
 
+    def iter_run(
+        self,
+        task: str,
+        cancellation_event: Optional[threading.Event] = None,
+        resume_from: Optional[Dict[str, Any]] = None,
+    ) -> Iterator[RunEvent]:
+        """Run the agent, yielding a :class:`RunEvent` as each thing happens.
+
+        Returns the :class:`AgentResult` as the generator's value, so
+        :meth:`run` is exactly ``drain this and take the result``.
+
+        This exists because ``/api/stream`` needs to observe a run *while*
+        it happens, and the only previous way to do that was to
+        re-implement the loop inline in the HTTP layer. The two copies then
+        drifted apart -- see BUGS.md #22. Emitting events is the smallest
+        thing that makes one implementation serve both, and it keeps the
+        difference between the endpoints where it belongs: in transport.
+
+        Nodes are executed here rather than by the graph, because a node
+        does not perform its own I/O any more -- it yields a description of
+        the call it needs (see :mod:`.events`) and this driver makes it.
+        :meth:`aiter_run` is the same loop with an awaiting driver.
+        """
+
+        ctx = self._prepare_context(task, resume_from)
         started = time.perf_counter()
         with bind_log_context(run_id=ctx.run_id, agent_name=self.agent_name), run_log_file(
             ctx.run_id
         ):
-            log_event(
-                logger,
-                logging.INFO,
-                "agent.run.started",
-                task_chars=len(task),
-                max_steps=self.max_steps,
-                max_tokens=self.max_tokens,
-                tool_count=len(self.tools),
-            )
+            self._log_started(task)
             try:
-                state: Dict[str, Any] = {
-                    "ctx": ctx,
-                    "loop": self,
-                    "__cancellation_event__": cancellation_event,
-                }
-                executor = self._graph.compile()
-                state = executor(state)
+                state = self._initial_state(ctx, cancellation_event)
+                yield RunEvent(RUN_STARTED, {"run_id": ctx.run_id, "task": task})
 
-                answer: Optional[str] = state.get("__answer__")
-                stop_reason: str = state.get("__stop_reason__", "finished")
+                traversal = self._graph.iter_steps(self._max_transitions())
+                try:
+                    _name, node = next(traversal)
+                    while True:
+                        state = yield from self._drive(node, state, ctx)
+                        try:
+                            _name, node = traversal.send(state)
+                        except StopIteration:
+                            break
+                finally:
+                    traversal.close()
 
-                if answer is None:
-                    answer = self._force_finish(ctx)
-                    if stop_reason == "finished":
-                        stop_reason = "no_answer"
-
-                suspended = stop_reason == SUSPENDED_STOP_REASON
-                result = AgentResult(
-                    answer=answer,
-                    success=stop_reason in ("finished",),
-                    steps=len(ctx.steps),
-                    tokens=ctx.tokens_used,
-                    stop_reason=stop_reason,
-                    trajectory=ctx.trajectory(),
-                    checkpoint=ctx.checkpoint() if suspended else None,
-                    pending_job_ids=list(state.get("__pending_job_ids__", [])),
-                )
-                if not suspended:
-                    # A suspended run has not completed, so it has nothing
-                    # to offer durable memory yet -- writing now would
-                    # record a half-finished conclusion as a fact.
-                    self._record_memory_event(task, result, ctx)
-                log_event(
-                    logger,
-                    logging.INFO,
-                    "agent.run.completed",
-                    success=result.success,
-                    stop_reason=result.stop_reason,
-                    steps=result.steps,
-                    tokens=result.tokens,
-                    answer_chars=len(result.answer),
-                    elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
-                )
+                result = self._assemble(task, state, ctx)
+                yield RunEvent(RUN_COMPLETED, self._completion_payload(result))
+                self._log_completed(result, started)
                 return result
             except Exception:
                 log_event(
@@ -289,6 +293,348 @@ class ReActLoop:
                     exc_info=True,
                 )
                 raise
+
+    async def aiter_run(
+        self,
+        task: str,
+        cancellation_event: Optional[threading.Event] = None,
+        resume_from: Optional[Dict[str, Any]] = None,
+    ) -> AsyncIterator[RunEvent]:
+        """:meth:`iter_run` for a caller that owns an event loop.
+
+        Identical traversal, identical nodes; the only difference is the
+        driver. Tool dispatch runs in a worker thread, so a slow tool cannot
+        stall every other request sharing the process (measured before this
+        existed: a 300ms tool delayed a 30ms coroutine to 342ms), and a
+        provider with real streaming produces :data:`TEXT` events as tokens
+        arrive.
+
+        The final :class:`AgentResult` cannot be returned -- an async
+        generator may not return a value -- so it rides on the terminating
+        :data:`RUN_COMPLETED` event's ``result`` key.
+        """
+
+        # Context providers retrieve (RAG) and summarize (session history);
+        # _assemble writes durable memory, which can embed. Both are provider
+        # I/O, and neither belongs on the event loop.
+        ctx = await asyncio.to_thread(self._prepare_context, task, resume_from)
+        started = time.perf_counter()
+        with bind_log_context(run_id=ctx.run_id, agent_name=self.agent_name), run_log_file(
+            ctx.run_id
+        ):
+            self._log_started(task)
+            try:
+                state = self._initial_state(ctx, cancellation_event)
+                yield RunEvent(RUN_STARTED, {"run_id": ctx.run_id, "task": task})
+
+                traversal = self._graph.iter_steps(self._max_transitions())
+                try:
+                    _name, node = next(traversal)
+                    while True:
+                        finished: List[Dict[str, Any]] = []
+                        async for event in self._adrive(node, state, ctx, finished):
+                            yield event
+                        state = finished[0]
+                        try:
+                            _name, node = traversal.send(state)
+                        except StopIteration:
+                            break
+                finally:
+                    traversal.close()
+
+                result = await asyncio.to_thread(self._assemble, task, state, ctx)
+                payload = self._completion_payload(result)
+                payload["result"] = result
+                yield RunEvent(RUN_COMPLETED, payload)
+                self._log_completed(result, started)
+            except Exception:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "agent.run.failed",
+                    elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+                    exc_info=True,
+                )
+                raise
+
+    # -- drivers ------------------------------------------------------------
+    def _drive(
+        self, node: Any, state: Dict[str, Any], ctx: ExecutionContext
+    ) -> Iterator[RunEvent]:
+        """Run one generator node on this thread, satisfying its effects.
+
+        Yields the node's events straight through; performs anything else it
+        yields and sends the result back in. Exceptions from an effect are
+        thrown *into* the node rather than propagated, so a node's own
+        ``try/except`` around its I/O keeps working exactly as it read when
+        the call was inline -- that is where ``TransientLLMError`` becomes a
+        graceful stop and ``SuspendRun`` becomes a checkpoint.
+        """
+
+        generator = node(state)
+        to_send: Any = None
+        to_throw: Optional[BaseException] = None
+        while True:
+            try:
+                if to_throw is not None:
+                    request = generator.throw(to_throw)
+                    to_throw = None
+                else:
+                    request = generator.send(to_send)
+            except StopIteration as done:
+                return done.value if done.value is not None else state
+            to_send = None
+            if isinstance(request, RunEvent):
+                yield request
+                continue
+            try:
+                to_send = self._perform(request, ctx)
+            except Exception as exc:  # noqa: BLE001 - handed to the node
+                to_throw = exc
+
+    async def _adrive(
+        self,
+        node: Any,
+        state: Dict[str, Any],
+        ctx: ExecutionContext,
+        finished: List[Dict[str, Any]],
+    ) -> AsyncIterator[RunEvent]:
+        """:meth:`_drive` with an awaiting effect performer.
+
+        The finished state is appended to ``finished`` rather than returned,
+        because an async generator cannot return a value.
+        """
+
+        generator = node(state)
+        to_send: Any = None
+        to_throw: Optional[BaseException] = None
+        while True:
+            try:
+                if to_throw is not None:
+                    request = generator.throw(to_throw)
+                    to_throw = None
+                else:
+                    request = generator.send(to_send)
+            except StopIteration as done:
+                finished.append(done.value if done.value is not None else state)
+                return
+            to_send = None
+            if isinstance(request, RunEvent):
+                yield request
+                continue
+            produced: List[Any] = []
+            try:
+                async for event in self._aperform(request, ctx, produced):
+                    yield event
+            except Exception as exc:  # noqa: BLE001 - handed to the node
+                to_throw = exc
+            else:
+                to_send = produced[0] if produced else None
+
+    def _perform(self, effect: Any, ctx: ExecutionContext) -> Any:
+        """Satisfy one effect by blocking on it."""
+
+        if isinstance(effect, ManageContext):
+            return self._manage_context(ctx)
+        if isinstance(effect, CallModel):
+            return self.llm.chat(effect.messages, tools=effect.tools)
+        if isinstance(effect, CallTool):
+            return self._dispatcher.dispatch(ctx, effect.name, effect.arguments)
+        raise TypeError(f"A node yielded something that is not an effect: {effect!r}")
+
+    def _manage_context(
+        self, ctx: ExecutionContext
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """The prompt for the next call, plus how many tokens compression saved.
+
+        Both halves can call the model (summarizing the overflow window,
+        compressing tool output), which is why this is reached through an
+        effect rather than run inline in the node.
+        """
+
+        managed = self.short_term.manage(ctx.messages)
+        if self.compressor is not None and self._near_budget(managed):
+            managed, saved = self.compressor.compress_messages(
+                managed, self._latest_user(ctx)
+            )
+            return managed, saved
+        return managed, 0
+
+    async def _aperform(
+        self, effect: Any, ctx: ExecutionContext, produced: List[Any]
+    ) -> AsyncIterator[RunEvent]:
+        """Satisfy one effect from an event loop, appending the result.
+
+        An async generator rather than a coroutine so a streamed model call
+        can emit :data:`TEXT` events as tokens arrive instead of after.
+        """
+
+        if isinstance(effect, ManageContext):
+            produced.append(await asyncio.to_thread(self._manage_context, ctx))
+            return
+
+        if isinstance(effect, CallTool):
+            produced.append(
+                await asyncio.to_thread(
+                    self._dispatcher.dispatch, ctx, effect.name, effect.arguments
+                )
+            )
+            return
+
+        if not isinstance(effect, CallModel):
+            raise TypeError(f"A node yielded something that is not an effect: {effect!r}")
+
+        if not _streams(self.llm):
+            # BaseLLM.astream's default just wraps chat(), so calling it here
+            # would block the loop while pretending to stream. Be honest and
+            # put the blocking call in a thread.
+            produced.append(
+                await asyncio.to_thread(self.llm.chat, effect.messages, effect.tools)
+            )
+            return
+
+        content = ""
+        tool_calls: List[ToolCall] = []
+        async for chunk in self.llm.astream(effect.messages, tools=effect.tools):
+            if chunk.get("type") == "text":
+                content += chunk["data"]
+                yield RunEvent(TEXT, {"step": effect.step_index, "token": chunk["data"]})
+            elif chunk.get("type") == "tool_call":
+                data = chunk["data"]
+                tool_calls.append(
+                    ToolCall(
+                        id=data.get("id", ""),
+                        name=data.get("name", ""),
+                        arguments=data.get("arguments"),
+                    )
+                )
+        produced.append(
+            LLMResponse(
+                content=content,
+                tool_calls=tool_calls,
+                # Streaming responses carry no usage block from any provider
+                # this repo talks to. Estimating both halves keeps the token
+                # budget working; `estimated` keeps it from being reported as
+                # measured. See BUGS.md #22 symptom 3, where the streaming
+                # path counted only the output text and a ~1000-token prompt
+                # was recorded as 5.
+                usage=Usage(
+                    prompt_tokens=_prompt_tokens(effect.messages, effect.tools),
+                    completion_tokens=estimate_tokens(content),
+                    estimated=True,
+                ),
+            )
+        )
+
+    # -- run scaffolding ----------------------------------------------------
+    def _prepare_context(
+        self, task: str, resume_from: Optional[Dict[str, Any]]
+    ) -> ExecutionContext:
+        if resume_from is not None:
+            return ExecutionContext.restore(resume_from)
+        ctx = ExecutionContext(max_steps=self.max_steps, max_tokens=self.max_tokens)
+        ctx.add_message("system", self.system_prompt)
+        for provider in self.context_providers:
+            for message in provider.prepare(task):
+                role = str(message.get("role", "system"))
+                content = str(message.get("content", ""))
+                if content:
+                    ctx.add_message(role, content)
+        ctx.add_message("user", task)
+        return ctx
+
+    def _initial_state(
+        self, ctx: ExecutionContext, cancellation_event: Optional[threading.Event]
+    ) -> Dict[str, Any]:
+        return {
+            "ctx": ctx,
+            "loop": self,
+            "__cancellation_event__": cancellation_event,
+        }
+
+    def _assemble(
+        self, task: str, state: Dict[str, Any], ctx: ExecutionContext
+    ) -> AgentResult:
+        answer: Optional[str] = state.get("__answer__")
+        stop_reason: str = state.get("__stop_reason__", "finished")
+
+        if answer is None:
+            answer = self._force_finish(ctx)
+            if stop_reason == "finished":
+                stop_reason = "no_answer"
+
+        suspended = stop_reason == SUSPENDED_STOP_REASON
+        result = AgentResult(
+            answer=answer,
+            success=stop_reason in ("finished",),
+            steps=len(ctx.steps),
+            tokens=ctx.tokens_used,
+            stop_reason=stop_reason,
+            trajectory=ctx.trajectory(),
+            checkpoint=ctx.checkpoint() if suspended else None,
+            pending_job_ids=list(state.get("__pending_job_ids__", [])),
+        )
+        if not suspended:
+            # A suspended run has not completed, so it has nothing to offer
+            # durable memory yet -- writing now would record a half-finished
+            # conclusion as a fact.
+            self._record_memory_event(task, result, ctx)
+        return result
+
+    def _max_transitions(self) -> int:
+        """The graph's safety net -- deliberately far above any real budget.
+
+        ``StateGraph``'s own default is 200, which is a fine number for
+        "this graph cannot terminate" and a bad one for this graph: a step
+        costs two transitions (think, act) and three when a tool failure
+        forces a reflection turn, so 200 fires at roughly 66 steps. The
+        shipped ``leader.max_steps`` is **100**, so a long run hit the graph
+        cap first and reported ``max_transitions (200)`` -- a number about
+        the engine, not about the run -- instead of its real stop reason.
+        See BUGS.md #23.
+
+        Computed per run rather than at construction because ``max_steps``
+        is writable (see ``ReActAgent``'s delegating properties).
+        ``ExecutionContext.over_budget()`` remains the authoritative guard;
+        this only catches a graph that cannot terminate at all.
+        """
+
+        return max(200, self.max_steps * 4 + 20)
+
+    def _log_started(self, task: str) -> None:
+        log_event(
+            logger,
+            logging.INFO,
+            "agent.run.started",
+            task_chars=len(task),
+            max_steps=self.max_steps,
+            max_tokens=self.max_tokens,
+            tool_count=len(self.tools),
+        )
+
+    def _log_completed(self, result: AgentResult, started: float) -> None:
+        log_event(
+            logger,
+            logging.INFO,
+            "agent.run.completed",
+            success=result.success,
+            stop_reason=result.stop_reason,
+            steps=result.steps,
+            tokens=result.tokens,
+            answer_chars=len(result.answer),
+            elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+        )
+
+    @staticmethod
+    def _completion_payload(result: AgentResult) -> Dict[str, Any]:
+        return {
+            "answer": result.answer,
+            "success": result.success,
+            "stop_reason": result.stop_reason,
+            "steps": result.steps,
+            "tokens": result.tokens,
+            "pending_job_ids": list(result.pending_job_ids),
+        }
 
     def _record_memory_event(
         self,
@@ -332,7 +678,13 @@ class ReActLoop:
             )
 
     # -- graph nodes --------------------------------------------------------
-    def _think_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    # Both nodes are generators. Everything they do is pure except the one
+    # call in the middle, which they ``yield`` as an effect and get the
+    # result of back (see :mod:`.events`). That is what lets a blocking
+    # driver and an awaiting driver share one node body: a ``def`` cannot
+    # ``await``, but it can ``yield``. They also ``yield`` RunEvents, which
+    # the driver forwards without sending anything back.
+    def _think_node(self, state: Dict[str, Any]) -> Iterator[Any]:
         """Graph node: one LLM call with memory management and compression."""
         ctx: ExecutionContext = state["ctx"]
 
@@ -361,11 +713,8 @@ class ReActLoop:
 
         step = ctx.new_step()
 
-        managed = self.short_term.manage(ctx.messages)
-
-        if self.compressor is not None and self._near_budget(managed):
-            query = self._latest_user(ctx)
-            managed, saved = self.compressor.compress_messages(managed, query)
+        managed, saved = yield ManageContext()
+        if saved:
             ctx.state["tokens_saved_by_compression"] = (
                 ctx.state.get("tokens_saved_by_compression", 0) + saved
             )
@@ -403,8 +752,9 @@ class ReActLoop:
             registry_size=len(self.tools),
             forced_reflection=reflect,
         )
+        yield RunEvent(THINK_STARTED, {"step": step.index})
         try:
-            response = self.llm.chat(managed, tools=offered)
+            response = yield CallModel(managed, offered, step.index)
         except TransientLLMError as exc:
             # The provider was unreachable/overloaded and
             # agent.retry.call_with_retry already spent its attempt budget.
@@ -425,6 +775,14 @@ class ReActLoop:
                 exc_info=True,
             )
             step.error = str(exc)
+            yield RunEvent(
+                ERROR,
+                {
+                    "step": step.index,
+                    "type": "llm_unavailable",
+                    "message": str(exc),
+                },
+            )
             state["__next__"] = "finish"
             state["__answer__"] = None
             state["__stop_reason__"] = "llm_unavailable"
@@ -449,9 +807,23 @@ class ReActLoop:
             prompt_tokens=response.usage.prompt_tokens,
             completion_tokens=response.usage.completion_tokens,
             total_tokens=response.usage.total_tokens,
+            estimated_usage=response.usage.estimated,
             elapsed_ms=round((time.perf_counter() - llm_started) * 1000, 2),
         )
         ctx.add_tokens(response.usage.total_tokens)
+        yield RunEvent(
+            THINK_COMPLETED,
+            {
+                "step": step.index,
+                "thought": response.content or "",
+                "tool_calls": [
+                    {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                    for tc in response.tool_calls
+                ],
+                "tokens": response.usage.total_tokens,
+                "estimated_usage": response.usage.estimated,
+            },
+        )
 
         if reflect:
             # No tools were offered, so this response can only be text --
@@ -463,6 +835,7 @@ class ReActLoop:
             step.thought = content
             step.observation = "reflection"
             ctx.add_message("assistant", content)
+            yield RunEvent(REFLECTION, {"step": step.index, "text": content})
             state["__next__"] = "think"
             return state
 
@@ -483,7 +856,7 @@ class ReActLoop:
 
         return state
 
-    def _act_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    def _act_node(self, state: Dict[str, Any]) -> Iterator[Any]:
         """Graph node: dispatch tool calls and record observations."""
         ctx: ExecutionContext = state["ctx"]
 
@@ -523,8 +896,17 @@ class ReActLoop:
                 state["__answer__"] = None
                 state["__stop_reason__"] = "cancelled"
                 return state
+            yield RunEvent(
+                TOOL_STARTED,
+                {
+                    "step": step.index,
+                    "id": tc.id,
+                    "name": tc.name,
+                    "arguments": tc.arguments,
+                },
+            )
             try:
-                observation = self._dispatcher.dispatch(ctx, tc.name, tc.arguments)
+                observation = yield CallTool(tc.name, tc.arguments)
             except SuspendRun as signal:
                 # Not a failure: the run is waiting on work that is
                 # deliberately not on this call stack. Record what has been
@@ -543,6 +925,10 @@ class ReActLoop:
                 state["__answer__"] = None
                 state["__stop_reason__"] = SUSPENDED_STOP_REASON
                 state["__next__"] = "finish"
+                yield RunEvent(
+                    SUSPENDED,
+                    {"step": step.index, "pending_job_ids": list(signal.job_ids)},
+                )
                 return state
             except FatalToolError as exc:
                 message = str(exc)
@@ -558,6 +944,14 @@ class ReActLoop:
                 state["__answer__"] = f"Fatal tool error: {message}"
                 state["__stop_reason__"] = "fatal_tool_error"
                 state["__next__"] = "finish"
+                yield RunEvent(
+                    ERROR,
+                    {
+                        "step": step.index,
+                        "type": "fatal_tool_error",
+                        "message": message,
+                    },
+                )
                 return state
             if self.output_guard is not None:
                 scan = self.output_guard.scan(observation)
@@ -580,6 +974,16 @@ class ReActLoop:
                 ok=ok,
             )
             ctx.add_message("tool", observation, tool_call_id=tc.id, name=tc.name)
+            yield RunEvent(
+                TOOL_COMPLETED,
+                {
+                    "step": step.index,
+                    "id": tc.id,
+                    "name": tc.name,
+                    "observation": observation,
+                    "ok": ok,
+                },
+            )
 
         if failed:
             # Force the *next* think call to run with no tools offered (see
@@ -634,6 +1038,20 @@ class ReActLoop:
 #: the whole transcript would drown the actual task in tool output, and the
 #: task itself is the strongest signal for which tools are relevant.
 _SELECTION_TRAJECTORY_WINDOW = 3
+
+
+def _streams(llm: BaseLLM) -> bool:
+    """Whether this provider actually streams, or just looks like it does.
+
+    ``BaseLLM.astream`` has a default implementation that calls ``chat()``
+    and yields the finished reply in one piece. That is the right fallback
+    for a caller that only wants one interface, but the async driver has to
+    tell the two apart: driving the default would block the event loop for
+    the whole call while emitting a single "token" at the end -- the worst
+    of both. Providers that genuinely stream override the method.
+    """
+
+    return type(llm).astream is not BaseLLM.astream
 
 
 def _prompt_tokens(

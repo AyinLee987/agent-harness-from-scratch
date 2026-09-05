@@ -16,7 +16,7 @@ Design goals:
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Iterator
 
 #: A graph node is a pure function: it receives state, does work, and returns
 #: the (possibly mutated) state. The node writes a ``"__next__"`` string key
@@ -104,6 +104,71 @@ class StateGraph:
         self._edges[from_node] = (router, mapping)
         return self
 
+    # -- traversal --------------------------------------------------------
+    def iter_steps(self, max_transitions: int = 200) -> Iterator[tuple[str, NodeFn]]:
+        """Walk the graph one node at a time, letting the caller run each node.
+
+        Yields ``(node_name, node_fn)`` and expects the state produced by
+        running that node to be sent back in::
+
+            traversal = graph.iter_steps()
+            name, node = next(traversal)
+            while True:
+                state = my_runner(node, state)
+                try:
+                    name, node = traversal.send(state)
+                except StopIteration:
+                    break
+
+        This is :meth:`compile` with the execution inverted. The graph still
+        owns routing -- it reads ``__next__`` and follows the same edges --
+        but the *caller* owns how a node gets executed. That separation is
+        what lets a single graph be driven both synchronously and from an
+        event loop without a second copy of the traversal (see
+        ``ReActLoop._drive`` / ``_adrive`` and BUGS.md #22).
+
+        ``compile()`` is now this plus a trivial runner, so the two cannot
+        disagree about routing.
+        """
+
+        if self._entry is None:
+            raise ValueError("No entry point set. Call set_entry_point() first.")
+
+        current: str | None = self._entry
+        transitions = 0
+        state: Dict[str, Any] = {}
+
+        while current is not None and current != self._END:
+            if transitions >= max_transitions:
+                state["__stop_reason__"] = f"max_transitions ({max_transitions})"
+                break
+
+            node_fn = self._nodes.get(current)
+            if node_fn is None:
+                state["__stop_reason__"] = f"unknown_node: {current}"
+                break
+
+            state = yield (current, node_fn)
+            transitions += 1
+
+            edge = self._edges.get(current)
+            if edge is None:
+                # No outgoing edge → node controls routing via __next__.
+                next_key: str = state.pop("__next__", self._END)
+                if next_key in (self._END, "finish"):
+                    break
+                if next_key not in self._nodes:
+                    state["__stop_reason__"] = f"unknown_node: {next_key}"
+                    break
+                current = next_key
+            elif isinstance(edge, str):
+                # Fixed edge → always go to the target.
+                current = edge
+            else:
+                # Conditional edge → call router, look up mapping.
+                router, mapping = edge
+                current = mapping.get(router(state), self._END)
+
     # -- compile ----------------------------------------------------------
     def compile(self, max_transitions: int = 200) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
         """Return a runnable executor function.
@@ -114,54 +179,30 @@ class StateGraph:
 
         Returns:
             A callable ``(state) -> state`` that drives the graph loop.
+
+        Implemented over :meth:`iter_steps` with the simplest possible
+        runner -- call the node, take what it returns -- so there is exactly
+        one copy of the routing logic.
         """
 
+        # Checked here as well as in iter_steps: a generator's body does not
+        # run until it is first advanced, so relying on iter_steps' own check
+        # would defer a misconfigured graph's failure from compile() to the
+        # first request, which is the wrong place to find out.
         if self._entry is None:
             raise ValueError("No entry point set. Call set_entry_point() first.")
 
-        nodes = self._nodes
-        edges = self._edges
-        entry = self._entry
-        end = self._END
-
         def executor(state: Dict[str, Any]) -> Dict[str, Any]:
-            current: str | None = entry
-            transitions = 0
-
-            while current is not None and current != end:
-                if transitions >= max_transitions:
-                    state["__stop_reason__"] = f"max_transitions ({max_transitions})"
-                    break
-
-                node_fn = nodes.get(current)
-                if node_fn is None:
-                    state["__stop_reason__"] = f"unknown_node: {current}"
-                    break
-
-                # Run the node.
+            traversal = self.iter_steps(max_transitions)
+            try:
+                _name, node_fn = next(traversal)
+            except StopIteration:
+                return state
+            while True:
                 state = node_fn(state)
-                transitions += 1
-
-                # Resolve the next node from the edge configuration.
-                edge = edges.get(current)
-                if edge is None:
-                    # No outgoing edge → node controls routing via __next__.
-                    next_key: str = state.pop("__next__", end)
-                    if next_key in (end, "finish"):
-                        break
-                    if next_key not in nodes:
-                        state["__stop_reason__"] = f"unknown_node: {next_key}"
-                        break
-                    current = next_key
-                elif isinstance(edge, str):
-                    # Fixed edge → always go to the target.
-                    current = edge
-                else:
-                    # Conditional edge → call router, look up mapping.
-                    router, mapping = edge
-                    route_key = router(state)
-                    current = mapping.get(route_key, end)
-
-            return state
+                try:
+                    _name, node_fn = traversal.send(state)
+                except StopIteration:
+                    return state
 
         return executor
