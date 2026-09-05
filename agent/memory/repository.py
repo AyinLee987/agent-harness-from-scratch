@@ -30,6 +30,11 @@ class MemoryRepository(Protocol):
     def update(self, record: MemoryRecord) -> None:
         ...
 
+    def touch_if_active(
+        self, record_id: str, *, accessed_at: datetime
+    ) -> Optional[MemoryRecord]:
+        ...
+
     def list_records(
         self,
         *,
@@ -67,6 +72,30 @@ class InMemoryMemoryRepository:
             if record.id not in self._records:
                 raise KeyError(record.id)
             self._records[record.id] = copy.deepcopy(record)
+
+    def touch_if_active(
+        self, record_id: str, *, accessed_at: datetime
+    ) -> Optional[MemoryRecord]:
+        """Stamp the access time, but only while the record is still ACTIVE.
+
+        Returns the updated record, or ``None`` if it is gone or no longer
+        active -- in which case the caller must drop it from the results.
+
+        Two problems with the ``get()`` / mutate / ``update()`` this
+        replaces. It was a read-modify-write of the *whole* record, so a
+        tombstone landing between the read and the write was overwritten by
+        the stale snapshot and the deleted memory came back ACTIVE. And it
+        rewrote every field to change one, so a ten-hit recall cost ten
+        full-row writes. See BUGS.md #13.
+        """
+
+        with self._lock:
+            record = self._records.get(record_id)
+            if record is None or record.status != MemoryStatus.ACTIVE:
+                return None
+            record.last_accessed_at = accessed_at
+            record.updated_at = accessed_at
+            return copy.deepcopy(record)
 
     def list_records(
         self,
@@ -168,6 +197,43 @@ class SQLiteMemoryRepository:
             if cursor.rowcount == 0:
                 raise KeyError(record.id)
             self._conn.commit()
+
+    def touch_if_active(
+        self, record_id: str, *, accessed_at: datetime
+    ) -> Optional[MemoryRecord]:
+        """Stamp the access time only while the record is still ACTIVE.
+
+        The ``status=?`` predicate is what makes this safe: a tombstone
+        that commits first leaves this UPDATE matching zero rows, so the
+        stale row is never written back. See
+        :meth:`InMemoryMemoryRepository.touch_if_active` and BUGS.md #13.
+        """
+
+        stamp = accessed_at.isoformat()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT record_json FROM memory_records WHERE id=? AND status=?",
+                (record_id, MemoryStatus.ACTIVE.value),
+            ).fetchone()
+            if row is None:
+                return None
+            record = self._decode(row["record_json"])
+            record.last_accessed_at = accessed_at
+            record.updated_at = accessed_at
+            cursor = self._conn.execute(
+                "UPDATE memory_records SET updated_at=?, record_json=? "
+                "WHERE id=? AND status=?",
+                (
+                    stamp,
+                    json.dumps(_record_to_dict(record), ensure_ascii=False),
+                    record_id,
+                    MemoryStatus.ACTIVE.value,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            self._conn.commit()
+            return record
 
     def list_records(
         self,

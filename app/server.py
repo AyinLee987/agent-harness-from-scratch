@@ -22,7 +22,9 @@ import logging
 import os
 import sys
 import time
-from contextlib import asynccontextmanager
+import uuid
+from contextlib import ExitStack, asynccontextmanager, contextmanager
+from dataclasses import replace
 from pathlib import Path as _Path
 from typing import Any, AsyncGenerator, List, Optional, Sequence
 
@@ -54,10 +56,30 @@ from pydantic import BaseModel
 from pydantic import Field
 
 from agent import (
+    AgentGateway,
     AgentRegistry,
     AgentSpec,
     AgentResult,
     ContextProvider,
+    DIRECT_SYSTEM_PROMPT,
+    GatewayError,
+    InMemoryCheckpointStore,
+    CheckpointStore,
+    JobBudget,
+    JobRunner,
+    LongRunningTool,
+    RunCheckpoint,
+    SQLiteCheckpointStore,
+    SQLiteJobStore,
+    create_job_tools,
+    LexicalToolSelector,
+    LLMQueryRouter,
+    MultiAgentRunResult,
+    QueueTimeout,
+    RateLimitExceeded,
+    Route,
+    RunPlan,
+    wants_escalation,
     DeepSeekLLM,
     ExplicitRequestMemoryExtractor,
     FatalToolError,
@@ -99,7 +121,8 @@ from agent import (
     log_event,
     tool,
 )
-from app.config import load_agent_config
+from agent.trigger.react_loop import SUSPENDED_STOP_REASON
+from app.config import load_agent_config, retry_policy
 
 configure_logging()
 logger = get_logger("server")
@@ -109,6 +132,25 @@ logger = get_logger("server")
 # and app/config.py. Loaded once at import time; edit the YAML and restart
 # to pick up changes. AGENT_CONFIG_PATH points at a different file.
 CONFIG = load_agent_config()
+
+# Deadline/retry policy for every provider call this process makes -- see
+# config/agent.yaml's `retry:` section and agent/retry.py for why the SDK
+# defaults (600s, two blind retries) are not acceptable here.
+RETRY_POLICY = retry_policy(CONFIG.retry)
+
+# Process-wide admission control. `None` when config/agent.yaml sets
+# `gateway.enabled: false`, which restores the pre-gateway behaviour of
+# admitting every request immediately -- see _admission() below.
+GATEWAY: Optional[AgentGateway] = (
+    AgentGateway(
+        rate_limit=CONFIG.gateway.rate_limit,
+        rate_window_seconds=CONFIG.gateway.rate_window_seconds,
+        max_concurrency=CONFIG.gateway.max_concurrency,
+        queue_timeout=CONFIG.gateway.queue_timeout_seconds,
+    )
+    if CONFIG.gateway.enabled
+    else None
+)
 
 # ---------------------------------------------------------------------------
 # Tools
@@ -263,14 +305,133 @@ OUTPUT_GUARD = ToolOutputGuard()
 # in-memory.
 SESSION_STORE: SessionMemoryStore = InMemorySessionStore()
 
-def _build_llm():
-    """Pick LLM: DeepSeek > OpenAI > MockLLM fallback."""
+# Long-running tool execution. Both default to the dependency-free
+# in-memory/absent form for the same reason SESSION_STORE does -- importing
+# this module (as a test calling route functions directly does) must never
+# touch disk or start threads. lifespan() swaps in the durable versions.
+JOB_RUNNER: Optional[JobRunner] = None
+CHECKPOINT_STORE: CheckpointStore = InMemoryCheckpointStore()
+
+def _auto_llm(spec):
+    """The historical environment chain: DeepSeek > OpenAI > MockLLM."""
+
     if os.getenv("DEEPSEEK_API_KEY"):
-        return DeepSeekLLM()
+        return DeepSeekLLM(
+            model=spec.model, temperature=spec.temperature, retry_policy=RETRY_POLICY
+        )
     if os.getenv("OPENAI_API_KEY") and os.getenv("USE_OPENAI"):
         from agent import OpenAILLM
-        return OpenAILLM()
+
+        kwargs = {"temperature": spec.temperature, "retry_policy": RETRY_POLICY}
+        if spec.model:
+            kwargs["model"] = spec.model
+        return OpenAILLM(**kwargs)
     return MockLLM()
+
+
+def _llm_for(spec):
+    """Build one model tier from its ``config/agent.yaml`` entry."""
+
+    provider = (spec.provider or "auto").strip().lower()
+    if provider == "auto":
+        return _auto_llm(spec)
+    if provider == "mock":
+        return MockLLM()
+    if provider == "deepseek":
+        return DeepSeekLLM(
+            model=spec.model, temperature=spec.temperature, retry_policy=RETRY_POLICY
+        )
+    if provider == "bailian":
+        from agent import BailianLLM
+
+        return BailianLLM(
+            model=spec.model, temperature=spec.temperature, retry_policy=RETRY_POLICY
+        )
+    if provider in ("openai", "openai_compatible"):
+        from agent import OpenAILLM
+
+        api_key = os.getenv(spec.api_key_env) if spec.api_key_env else None
+        if spec.api_key_env and not api_key:
+            # Fail loud on setup (AGENTS.md §1.3): a tier pointed at an
+            # unset key would otherwise only blow up on the first request
+            # that happened to route to it.
+            raise RuntimeError(
+                f"config/agent.yaml points a model tier at {spec.api_key_env}, "
+                f"which is not set."
+            )
+        kwargs = {
+            "temperature": spec.temperature,
+            "retry_policy": RETRY_POLICY,
+            "base_url": spec.base_url,
+            "api_key": api_key,
+        }
+        if spec.model:
+            kwargs["model"] = spec.model
+        return OpenAILLM(**kwargs)
+    raise RuntimeError(
+        f"Unknown model provider {spec.provider!r} in config/agent.yaml. "
+        f"Use one of: auto, mock, deepseek, bailian, openai_compatible."
+    )
+
+
+def _build_llm():
+    """The model the ReAct loop itself runs on (``models.react``)."""
+
+    return _llm_for(CONFIG.models.react)
+
+
+def _build_fast_llm():
+    """The cheap tier (``models.fast``) for short, structured, verifiable calls.
+
+    Falls back to :func:`_build_llm` while ``models.fast`` is left at
+    ``provider: auto`` -- so a deployment that never configures a second
+    tier behaves exactly as it did before, and so a test that patches
+    ``_build_llm`` still controls every model in the process rather than
+    having half of them silently escape to a real provider.
+    """
+
+    if (CONFIG.models.fast.provider or "auto").strip().lower() == "auto":
+        return _build_llm()
+    return _llm_for(CONFIG.models.fast)
+
+
+@contextmanager
+def _admission(trace_id: Optional[str] = None):
+    """Hold a gateway slot for the duration of one agent run.
+
+    A no-op when the gateway is disabled, so every call site can wrap
+    itself unconditionally instead of branching. Must be entered from a
+    worker thread -- ``AgentGateway.admit`` blocks while queueing.
+    """
+
+    if GATEWAY is None:
+        yield None
+        return
+    with GATEWAY.admit(trace_id) as admission:
+        yield admission
+
+
+def _gateway_http_error(exc: GatewayError) -> HTTPException:
+    """Map an admission rejection onto the status a client should act on.
+
+    ``429`` says "you are asking too often, back off"; ``503`` says "the
+    server is saturated, this request never started". Both carry
+    ``Retry-After`` so a client has something better than a guess.
+    """
+
+    if isinstance(exc, RateLimitExceeded):
+        return HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(max(1, int(exc.retry_after)))},
+        )
+    if isinstance(exc, QueueTimeout):
+        return HTTPException(
+            status_code=503,
+            detail=str(exc),
+            headers={"Retry-After": str(max(1, int(CONFIG.gateway.queue_timeout_seconds)))},
+        )
+    return HTTPException(status_code=503, detail=str(exc))
 
 
 def _fetch_mcp_enabled() -> bool:
@@ -343,7 +504,7 @@ def _start_rag():
     # agent/rag/decomposition.py. Off by default: one extra LLM call per
     # retrieval, only worth it if your corpus actually has compound/
     # multi-hop questions to answer.
-    decomposer = LLMQueryDecomposer(_build_llm()) if _enabled("ENABLE_RAG_QUERY_DECOMPOSITION") else None
+    decomposer = LLMQueryDecomposer(_build_fast_llm()) if _enabled("ENABLE_RAG_QUERY_DECOMPOSITION") else None
     # Opt-in: replace the default HeuristicReranker (lexical-overlap
     # heuristic) with one that asks the chat model itself to score each
     # candidate's relevance. Real cost: ~2.2s added per retrieval (one more
@@ -352,7 +513,7 @@ def _start_rag():
     # both plain RRF fusion and HeuristicReranker on every metric,
     # significantly on Recall@5/10 and nDCG@5/10 -- not on MRR. Off by
     # default because of that latency, not because it measures worse.
-    reranker = LLMReranker(_build_llm()) if _enabled("ENABLE_LLM_RERANKER") else None
+    reranker = LLMReranker(_build_fast_llm()) if _enabled("ENABLE_LLM_RERANKER") else None
     RAG_REPOSITORY = repository
     RAG_PIPELINE = RAGPipeline(repository, bm25, dense, reranker=reranker, decomposer=decomposer)
     RAG_INGESTION = ingestion
@@ -431,6 +592,23 @@ LEADER_SYSTEM_PROMPT = (
 )
 
 
+def _tool_selector():
+    """The Leader's tool selector, or ``None`` to offer every tool.
+
+    Only the Leader gets one: a Worker's registry is already small and
+    purpose-built (see ``build_researcher``/``build_analyst`` below), which
+    is the same problem tool routing solves, solved by hand.
+    """
+
+    if not CONFIG.tool_router.enabled:
+        return None
+    return LexicalToolSelector(
+        top_k=CONFIG.tool_router.top_k,
+        min_tools=CONFIG.tool_router.min_tools,
+        pinned=CONFIG.tool_router.pinned,
+    )
+
+
 def _copy_tools(*names: str) -> ToolRegistry:
     selected = [REGISTRY.get(name) for name in names]
     return ToolRegistry([item for item in selected if item is not None])
@@ -439,6 +617,7 @@ def _copy_tools(*names: str) -> ToolRegistry:
 def _build_leader_runtime(
     max_steps: Optional[int] = None,
     extra_context_providers: Optional[Sequence[ContextProvider]] = None,
+    attach_rag: bool = True,
 ):
     """Create a request-scoped Leader whose delegation ability is a tool set.
 
@@ -448,6 +627,14 @@ def _build_leader_runtime(
     explicit value (e.g. a client's ``POST /api/run`` request) overrides
     both with that one number, matching the pre-config behavior where a
     single ``max_steps`` applied to the whole run.
+
+    ``attach_rag=False`` skips the *mandatory* evidence injection
+    (``RAGContextProvider``) while still registering
+    ``medical_evidence_search`` as a tool. That distinction is the whole
+    point of the router's ``react`` route: a task that needs tools may or
+    may not also need the corpus, and paying for a full retrieval before
+    the model has decided is the cost this removes. It never removes the
+    model's *ability* to retrieve.
     """
 
     leader_max_steps = CONFIG.leader.max_steps if max_steps is None else max_steps
@@ -542,8 +729,9 @@ def _build_leader_runtime(
             namespace=MEMORY_NAMESPACE, subject_id=MEMORY_SUBJECT_ID,
         ))
     leader_registry.register_many(orchestrator.leader_tools())
+    leader_registry = _register_job_tools(leader_registry)
     context_providers: List[ContextProvider] = []
-    if RAG_PIPELINE:
+    if RAG_PIPELINE and attach_rag:
         context_providers.append(RAGContextProvider(
             RAG_PIPELINE, citation_counter=leader_citation_counter,
         ))
@@ -560,6 +748,7 @@ def _build_leader_runtime(
         source_failure_hint_threshold=CONFIG.react_loop.source_failure_hint_threshold,
         compress_at_fraction=CONFIG.react_loop.compress_at_fraction,
         agent_name="leader",
+        tool_selector=_tool_selector(),
         context_providers=context_providers or None,
         memory_manager=MEMORY_MANAGER,
         memory_namespace=MEMORY_NAMESPACE,
@@ -568,10 +757,153 @@ def _build_leader_runtime(
     return orchestrator, leader
 
 
+RAG_DOMAIN_HINT = os.getenv(
+    "ROUTER_DOMAIN_HINT",
+    "医疗健康：症状分诊、常见疾病、用药与就诊科室建议，证据来自权威医学资料库。",
+)
+
+
+def _plan_run(task: str) -> RunPlan:
+    """Classify one request, or return the pre-router plan when disabled.
+
+    The disabled path deliberately reports ``needs_retrieval=True``: with no
+    router, ``RAGContextProvider`` ran on every single request, and turning
+    the router off has to mean *exactly* the old behaviour, not a quietly
+    different one.
+    """
+
+    if not CONFIG.router.enabled:
+        return RunPlan(
+            route=Route.REACT,
+            task=task,
+            original_task=task,
+            needs_retrieval=True,
+            reasoning="router disabled",
+        )
+
+    plan = LLMQueryRouter(
+        _build_fast_llm(), domain_hint=RAG_DOMAIN_HINT if RAG_PIPELINE else ""
+    ).route(task)
+    if not CONFIG.router.use_rewrite:
+        # Classification is the cheap, checkable half; rewriting is the half
+        # that can silently drop something the user actually typed. They are
+        # separately switchable so the first can ship without the second.
+        plan = replace(plan, task=plan.original_task)
+    return plan
+
+
+def _run_direct(plan: RunPlan) -> Optional[MultiAgentRunResult]:
+    """Answer a ``direct``-routed request with one tool-less model call.
+
+    Returns ``None`` when the model replies with the escalation sentinel,
+    which is the caller's signal to fall through to the full loop. That
+    escape hatch is what makes the route safe to act on: the failure mode
+    of a misroute is one wasted fast call, not a confidently wrong answer.
+    """
+
+    agent = ReActAgent(
+        llm=_build_llm(),
+        tools=ToolRegistry([]),
+        system_prompt=DIRECT_SYSTEM_PROMPT,
+        max_steps=CONFIG.router.direct_max_steps,
+        max_tokens=CONFIG.leader.max_tokens,
+        agent_name="direct",
+    )
+    result = agent.run(plan.task)
+    if wants_escalation(result.answer):
+        log_event(
+            logger,
+            logging.INFO,
+            "router.route.escalated",
+            reason="direct answer requested tools",
+            task_chars=len(plan.task),
+        )
+        return None
+    log_event(
+        logger,
+        logging.INFO,
+        "router.route.direct_answered",
+        steps=result.steps,
+        tokens=result.tokens,
+    )
+    return MultiAgentRunResult(
+        root_run_id="",
+        answer=result.answer,
+        success=result.success,
+        steps=result.steps,
+        tokens=result.tokens,
+        stop_reason=result.stop_reason,
+        trajectory=result.trajectory,
+        subagents=[],
+    )
+
+
 def _start_session_store() -> SessionMemoryStore:
     """Swap the module-default in-memory session store for a durable one."""
 
     return SQLiteSessionStore(os.getenv("SESSION_DB_PATH", "data/sessions.sqlite"))
+
+
+def _start_jobs():
+    """Build the durable job runner and checkpoint store, if jobs are on."""
+
+    if not CONFIG.jobs.enabled:
+        return None, InMemoryCheckpointStore()
+    runner = JobRunner(
+        store=SQLiteJobStore(os.getenv("JOBS_DB_PATH", "data/jobs.sqlite")),
+        budget=JobBudget(
+            max_parallel_jobs=CONFIG.jobs.max_parallel_jobs,
+            max_duration_seconds=CONFIG.jobs.max_duration_seconds,
+            stall_timeout_seconds=CONFIG.jobs.stall_timeout_seconds,
+            dedupe_ttl_seconds=CONFIG.jobs.dedupe_ttl_seconds,
+        ),
+    )
+    checkpoints = SQLiteCheckpointStore(
+        os.getenv("CHECKPOINT_DB_PATH", "data/checkpoints.sqlite")
+    )
+    # Jobs left running by a previous process are visible but not adopted:
+    # their worker threads died with that process, so reporting them as
+    # still running would be a lie. Surfacing the count is the honest
+    # middle ground -- an operator can see that work was lost, which an
+    # in-memory-only design could not have told them at all.
+    orphans = runner.store.list_unfinished()
+    log_event(
+        logger,
+        logging.INFO,
+        "jobs.started",
+        long_running_tools=list(CONFIG.jobs.long_running),
+        orphaned_jobs=len(orphans),
+        suspended_runs=len(checkpoints.list_suspended()),
+    )
+    return runner, checkpoints
+
+
+def _register_job_tools(registry: ToolRegistry) -> ToolRegistry:
+    """Wrap the configured long-running tools and add the job control tools.
+
+    Wrapping happens by re-registering under the same name, so the model's
+    view of the tool -- its name and arguments -- is unchanged; only what
+    it gets back differs. See :class:`~agent.jobs.LongRunningTool`.
+    """
+
+    if JOB_RUNNER is None:
+        return registry
+
+    wrapped: List[Any] = []
+    for name in registry.names():
+        item = registry.get(name)
+        if item is None:
+            continue
+        wrapped.append(
+            LongRunningTool(item, JOB_RUNNER)
+            if name in CONFIG.jobs.long_running
+            else item
+        )
+    rebuilt = ToolRegistry(wrapped)
+    rebuilt.register_many(create_job_tools(
+        JOB_RUNNER, default_wait_seconds=CONFIG.jobs.await_seconds
+    ))
+    return rebuilt
 
 
 @asynccontextmanager
@@ -579,11 +911,13 @@ async def lifespan(_app: FastAPI):
     """Connect explicitly enabled MCP servers and close them on shutdown."""
 
     global MCP_MANAGER, RAG_REPOSITORY, RAG_PIPELINE, RAG_INGESTION, MEMORY_MANAGER, SESSION_STORE
+    global JOB_RUNNER, CHECKPOINT_STORE
     manager = None
     try:
         await asyncio.to_thread(_start_rag)
         await asyncio.to_thread(_start_memory)
         SESSION_STORE = await asyncio.to_thread(_start_session_store)
+        JOB_RUNNER, CHECKPOINT_STORE = await asyncio.to_thread(_start_jobs)
         if _fetch_mcp_enabled():
             try:
                 from agent.mcp import MCPManager, MCPServerConfig, uv_tool_command
@@ -608,6 +942,13 @@ async def lifespan(_app: FastAPI):
             MCP_MANAGER = manager
         yield
     finally:
+        if JOB_RUNNER is not None:
+            # Jobs still running are cancelled rather than waited on: an
+            # in-flight half-hour job would otherwise block shutdown for
+            # half an hour. Their records stay in the store, so the next
+            # process can see that they were interrupted.
+            await asyncio.to_thread(JOB_RUNNER.close)
+        JOB_RUNNER = None
         if manager is not None:
             await asyncio.to_thread(manager.close)
         MCP_MANAGER = None
@@ -698,10 +1039,25 @@ class RunResponse(BaseModel):
         "back on the next request to continue. Absent when the caller "
         "didn't ask for continuation.",
     )
+    run_id: Optional[str] = Field(
+        default=None,
+        description="Set only when stop_reason is 'suspended_on_jobs'. The "
+        "run is waiting on long-running work; POST /api/runs/{run_id}/resume "
+        "to continue it once the jobs finish.",
+    )
+    pending_job_ids: list[str] = Field(
+        default_factory=list,
+        description="Jobs the suspended run is waiting on. Poll them with "
+        "GET /api/jobs/{job_id}.",
+    )
 
     @classmethod
     def from_result(
-        cls, r: AgentResult, *, conversation_id: Optional[str] = None
+        cls,
+        r: AgentResult,
+        *,
+        conversation_id: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> "RunResponse":
         return cls(
             answer=r.answer,
@@ -711,6 +1067,8 @@ class RunResponse(BaseModel):
             stop_reason=r.stop_reason,
             trajectory=r.trajectory,
             conversation_id=conversation_id,
+            run_id=run_id,
+            pending_job_ids=list(getattr(r, "pending_job_ids", []) or []),
         )
 
 
@@ -726,12 +1084,28 @@ async def index():
 
 @app.get("/api/health")
 async def health():
+    """Health check plus the two saturation numbers worth watching.
+
+    ``free_slots``/``queued`` are what tell a load balancer (or a human
+    reading a dashboard) whether 503s are coming: a queue that is
+    persistently non-empty means ``gateway.max_concurrency`` is below what
+    this deployment actually needs.
+    """
+
     llm = _build_llm()
-    return {
+    payload = {
         "status": "ok",
         "model": getattr(llm, "model", "mock"),
         "tools": len(REGISTRY),
     }
+    if GATEWAY is not None:
+        payload["gateway"] = {
+            "max_concurrency": CONFIG.gateway.max_concurrency,
+            "free_slots": GATEWAY.concurrency_guard.available,
+            "queued": GATEWAY.queue.size,
+            "rate_limit": CONFIG.gateway.rate_limit,
+        }
+    return payload
 
 
 @app.post("/api/rag/documents", response_model=RAGDocumentResponse, status_code=201)
@@ -851,23 +1225,166 @@ async def run(req: RunRequest):
         session_provider = SessionContextProvider(
             SESSION_STORE,
             req.conversation_id,
-            llm=_build_llm(),
+            llm=_build_fast_llm(),
             recent_window=CONFIG.session.recent_window,
             summarize_beyond=CONFIG.session.summarize_beyond,
         )
         extra_providers.append(session_provider)
 
     def execute():
-        orchestrator, leader = _build_leader_runtime(
-            req.max_steps, extra_context_providers=extra_providers
-        )
-        with orchestrator:
-            return orchestrator.run_leader(leader, req.task)
+        # Admission happens inside the worker thread because
+        # AgentGateway.admit() blocks while queueing; doing it here rather
+        # than in the coroutine keeps the event loop free.
+        with _admission():
+            plan = _plan_run(req.task)
+            if plan.route is Route.DIRECT and CONFIG.router.act_on_direct:
+                direct = _run_direct(plan)
+                if direct is not None:
+                    return direct
+            orchestrator, leader = _build_leader_runtime(
+                req.max_steps,
+                extra_context_providers=extra_providers,
+                attach_rag=plan.needs_retrieval,
+            )
+            with orchestrator:
+                return orchestrator.run_leader(leader, plan.task)
 
-    result = await asyncio.to_thread(execute)
+    try:
+        result = await asyncio.to_thread(execute)
+    except GatewayError as exc:
+        raise _gateway_http_error(exc) from exc
+
+    if result.stop_reason == SUSPENDED_STOP_REASON:
+        # Nothing is recorded on the conversation yet: the run has not
+        # produced an answer, and persisting a half-finished one would
+        # show up as the assistant's reply on the next reload.
+        run_id = await asyncio.to_thread(
+            _save_checkpoint, req.task, result, req.conversation_id
+        )
+        return RunResponse.from_result(
+            result, conversation_id=req.conversation_id, run_id=run_id
+        )
+
     if session_provider is not None:
         await asyncio.to_thread(session_provider.record_turn, req.task, result.answer)
     return RunResponse.from_result(result, conversation_id=req.conversation_id)
+
+
+def _save_checkpoint(
+    task: str, result, conversation_id: Optional[str]
+) -> str:
+    run_id = uuid.uuid4().hex[:12]
+    CHECKPOINT_STORE.save(
+        RunCheckpoint(
+            run_id=run_id,
+            task=task,
+            checkpoint=result.checkpoint or {},
+            pending_job_ids=list(result.pending_job_ids),
+            conversation_id=conversation_id,
+        )
+    )
+    log_event(
+        logger,
+        logging.INFO,
+        "run.suspended.saved",
+        run_id=run_id,
+        pending_job_ids=list(result.pending_job_ids),
+    )
+    return run_id
+
+
+@app.get("/api/jobs/{job_id}")
+async def job_status(job_id: str):
+    """Current state of one long-running job."""
+
+    if JOB_RUNNER is None:
+        raise HTTPException(503, "Long-running jobs are disabled (jobs.enabled).")
+    job = await asyncio.to_thread(JOB_RUNNER.get, job_id)
+    if job is None:
+        raise HTTPException(404, f"Unknown job_id {job_id!r}.")
+    return job.to_dict()
+
+
+@app.delete("/api/jobs/{job_id}")
+async def cancel_job(job_id: str):
+    """Stop a long-running job whose result is no longer needed."""
+
+    if JOB_RUNNER is None:
+        raise HTTPException(503, "Long-running jobs are disabled (jobs.enabled).")
+    job = await asyncio.to_thread(JOB_RUNNER.cancel, job_id)
+    if job is None:
+        raise HTTPException(404, f"Unknown job_id {job_id!r}.")
+    return job.to_dict(include_result=False)
+
+
+@app.get("/api/runs/{run_id}")
+async def suspended_run(run_id: str):
+    """Whether a suspended run is ready to resume, and what it is waiting on."""
+
+    stored = await asyncio.to_thread(CHECKPOINT_STORE.load, run_id)
+    if stored is None:
+        raise HTTPException(404, f"Unknown or already-resumed run_id {run_id!r}.")
+    jobs = []
+    if JOB_RUNNER is not None:
+        for job_id in stored.pending_job_ids:
+            job = await asyncio.to_thread(JOB_RUNNER.get, job_id)
+            if job is not None:
+                jobs.append(job.to_dict(include_result=False))
+    return {
+        "run_id": stored.run_id,
+        "status": "suspended",
+        "task": stored.task,
+        "conversation_id": stored.conversation_id,
+        "pending_jobs": jobs,
+        "ready": bool(jobs) and all(job["status"] not in ("pending", "running") for job in jobs),
+    }
+
+
+@app.post("/api/runs/{run_id}/resume", response_model=RunResponse)
+async def resume_run(run_id: str):
+    """Continue a run that suspended waiting on long-running jobs.
+
+    The checkpoint is deleted only once the run reaches a terminal state --
+    a resume that suspends again saves a *new* checkpoint under the same
+    id, so a job that finishes in two stages doesn't strand the run.
+    """
+
+    stored = await asyncio.to_thread(CHECKPOINT_STORE.load, run_id)
+    if stored is None:
+        raise HTTPException(404, f"Unknown or already-resumed run_id {run_id!r}.")
+
+    def execute():
+        with _admission():
+            orchestrator, leader = _build_leader_runtime()
+            with orchestrator:
+                return orchestrator.run_leader(
+                    leader, stored.task, resume_from=stored.checkpoint
+                )
+
+    try:
+        result = await asyncio.to_thread(execute)
+    except GatewayError as exc:
+        raise _gateway_http_error(exc) from exc
+
+    if result.stop_reason == SUSPENDED_STOP_REASON:
+        stored.checkpoint = result.checkpoint or {}
+        stored.pending_job_ids = list(result.pending_job_ids)
+        await asyncio.to_thread(CHECKPOINT_STORE.save, stored)
+        return RunResponse.from_result(
+            result, conversation_id=stored.conversation_id, run_id=run_id
+        )
+
+    await asyncio.to_thread(CHECKPOINT_STORE.delete, run_id)
+    if stored.conversation_id:
+        provider = SessionContextProvider(
+            SESSION_STORE,
+            stored.conversation_id,
+            llm=_build_fast_llm(),
+            recent_window=CONFIG.session.recent_window,
+            summarize_beyond=CONFIG.session.summarize_beyond,
+        )
+        await asyncio.to_thread(provider.record_turn, stored.task, result.answer)
+    return RunResponse.from_result(result, conversation_id=stored.conversation_id)
 
 
 @app.get("/api/conversations/{conversation_id}")
@@ -901,7 +1418,7 @@ async def conversation_title(conversation_id: str):
     first_user = next((str(m.get("content") or "") for m in messages if m.get("role") == "user"), "")
     fallback = (first_user[:24] + "…") if len(first_user) > 24 else (first_user or "对话")
 
-    llm = _build_llm()
+    llm = _build_fast_llm()
     transcript = "\n".join(
         f"{m.get('role')}: {m.get('content')}" for m in messages[:6] if m.get("content")
     )
@@ -947,13 +1464,29 @@ async def stream(
         session_provider = SessionContextProvider(
             SESSION_STORE,
             conversation_id,
-            llm=_build_llm(),
+            llm=_build_fast_llm(),
             recent_window=CONFIG.session.recent_window,
             summarize_beyond=CONFIG.session.summarize_beyond,
         )
 
+    # Claim a gateway slot *before* the response starts, so a rejected
+    # request gets a real 429/503 instead of an SSE stream whose first event
+    # is an error -- and hold it until the generator finishes, since the run
+    # occupies a concurrency slot for the whole stream, not just its setup.
+    # ExitStack because the slot is acquired here and released inside the
+    # generator's finally, on the other side of an async boundary.
+    admission_stack = ExitStack()
+    try:
+        await asyncio.to_thread(admission_stack.enter_context, _admission())
+    except GatewayError as exc:
+        raise _gateway_http_error(exc) from exc
+
+    plan = await asyncio.to_thread(_plan_run, task)
+    take_direct = plan.route is Route.DIRECT and CONFIG.router.act_on_direct
+
     orchestrator, agent = _build_leader_runtime(
         extra_context_providers=[session_provider] if session_provider else None,
+        attach_rag=plan.needs_retrieval,
     )
     llm = agent.llm
     leader_registry = agent.tools
@@ -987,6 +1520,48 @@ async def stream(
             await asyncio.to_thread(session_provider.record_user_message, task)
 
         try:
+            if take_direct:
+                # Buffered rather than streamed through, deliberately: a
+                # direct answer that turns out to need tools escalates into
+                # the full loop, and tokens already delivered to a browser
+                # cannot be unsaid. Buffering makes the escalation entirely
+                # invisible to the client -- no "discard what I just sent"
+                # event to handle -- and costs nothing worth having, since
+                # the direct route is by definition the short answer.
+                buffered: List[tuple] = []
+                stats = {"steps": 0, "tokens": 0}
+                async for event, data in _stream_direct_answer(plan):
+                    if event == "__stats__":
+                        stats = data
+                    else:
+                        buffered.append((event, data))
+                if buffered:
+                    yield _sse("start", {
+                        "task": task,
+                        "tools": [],
+                        "root_run_id": "",
+                        "conversation_id": conversation_id,
+                        "route": plan.route.value,
+                    })
+                    for event, data in buffered:
+                        if event == "answer":
+                            final_answer = data["text"]
+                        yield _sse(event, data)
+                    yield _sse("done", {
+                        **stats,
+                        "success": True,
+                        "stop_reason": "finished",
+                        "root_run_id": "",
+                        "subagents": [],
+                        "conversation_id": conversation_id,
+                        "route": plan.route.value,
+                    })
+                    if session_provider is not None and final_answer is not None:
+                        await asyncio.to_thread(
+                            session_provider.record_assistant_message, final_answer
+                        )
+                    return
+
             with orchestrator.leader_scope() as root_run_id:
                 with bind_log_context(run_id=ctx.run_id, agent_name="leader"):
                     stream_started = time.perf_counter()
@@ -1069,6 +1644,7 @@ async def stream(
             })
         finally:
             await asyncio.to_thread(orchestrator.close)
+            await asyncio.to_thread(admission_stack.close)
 
     return StreamingResponse(
         event_stream(),
@@ -1079,6 +1655,90 @@ async def stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+def _offered_schemas_for(agent, registry: ToolRegistry, ctx) -> list:
+    """Tool schemas for one streaming think step, honouring the selector."""
+
+    from agent.trigger.react_loop import _selection_query, _tools_used
+    from agent.trigger.tool_router import filtered_schemas
+
+    selector = getattr(agent, "tool_selector", None)
+    if selector is None:
+        return registry.schemas()
+    selection = selector.select(
+        registry, _selection_query(ctx), used=_tools_used(ctx)
+    )
+    return filtered_schemas(registry, selection)
+
+
+async def _stream_direct_answer(plan: RunPlan):
+    """Stream one tool-less answer for a ``direct``-routed request.
+
+    Yields the same ``(event, data)`` pairs as :func:`_stream_leader_steps`
+    plus a final ``("__stats__", {...})``, and yields **nothing at all**
+    when the model asks to escalate -- an empty result is the caller's
+    signal to fall through to the full loop. Reusing
+    :func:`_stream_leader_steps` with an empty registry rather than writing
+    a second think loop keeps the reflection/budget/logging behaviour
+    identical on both paths.
+    """
+
+    from agent.state.context import ExecutionContext
+
+    registry = ToolRegistry([])
+    direct_agent = ReActAgent(
+        llm=_build_llm(),
+        tools=registry,
+        system_prompt=DIRECT_SYSTEM_PROMPT,
+        max_steps=CONFIG.router.direct_max_steps,
+        max_tokens=CONFIG.leader.max_tokens,
+        agent_name="direct",
+    )
+    ctx = ExecutionContext(
+        max_steps=direct_agent.max_steps, max_tokens=direct_agent.max_tokens
+    )
+    ctx.add_message("system", DIRECT_SYSTEM_PROMPT)
+    ctx.add_message("user", plan.task)
+
+    collected: List[tuple] = []
+    answer: Optional[str] = None
+    with bind_log_context(run_id=ctx.run_id, agent_name="direct"):
+        async for event, data in _stream_leader_steps(
+            task=plan.task,
+            agent=direct_agent,
+            llm=direct_agent.llm,
+            registry=registry,
+            dispatcher=ToolDispatcher(registry),
+            ctx=ctx,
+        ):
+            if event == "__stop__":
+                continue
+            if event == "answer":
+                answer = data["text"]
+            collected.append((event, data))
+
+        if wants_escalation(answer):
+            log_event(
+                logger,
+                logging.INFO,
+                "router.route.escalated",
+                reason="direct answer requested tools",
+                task_chars=len(plan.task),
+            )
+            return
+
+        log_event(
+            logger,
+            logging.INFO,
+            "router.route.direct_answered",
+            steps=len(ctx.steps),
+            tokens=ctx.tokens_used,
+        )
+
+    for payload in collected:
+        yield payload
+    yield "__stats__", {"steps": len(ctx.steps), "tokens": ctx.tokens_used}
 
 
 async def _stream_leader_steps(*, task, agent, llm, registry, dispatcher, ctx):
@@ -1104,6 +1764,11 @@ async def _stream_leader_steps(*, task, agent, llm, registry, dispatcher, ctx):
         yield "think_start", {"step": step_idx}
         full_content = ""
         tool_calls = []
+        # Same narrowing the non-streaming loop applies (see
+        # ReActLoop._offered_schemas); kept in step here rather than
+        # skipped, so the two paths cannot drift into offering the model
+        # different tool sets for the same request.
+        offered = None if reflect else _offered_schemas_for(agent, registry, ctx)
         llm_started = time.perf_counter()
         log_event(
             logger,
@@ -1111,14 +1776,15 @@ async def _stream_leader_steps(*, task, agent, llm, registry, dispatcher, ctx):
             "llm.stream.started",
             step=step_idx,
             message_count=len(ctx.messages),
-            tool_count=0 if reflect else len(registry),
+            tool_count=0 if offered is None else len(offered),
+            registry_size=len(registry),
             forced_reflection=reflect,
         )
 
         try:
             async for event in llm.astream(
                 agent.short_term.manage(ctx.messages),
-                tools=None if reflect else registry.schemas(),
+                tools=offered,
             ):
                 if event["type"] == "text":
                     full_content += event["data"]

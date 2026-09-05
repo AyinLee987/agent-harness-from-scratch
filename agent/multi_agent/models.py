@@ -118,7 +118,7 @@ class SubagentResult:
         return data
 
     def tool_call_summary(self) -> List[Dict[str, Any]]:
-        """One {tool, ok} entry per step that made a tool call.
+        """One {tool, ok} entry per tool call.
 
         Cheap enough to always include -- unlike the full trajectory, whose
         observations can be large (a single fetch result can run to
@@ -128,23 +128,38 @@ class SubagentResult:
         failing) without paying for every call's full output text. Set
         ``include_trajectory=True`` on :meth:`to_dict` for the full detail.
 
-        ``step["error"]`` is *not* the right signal here -- ToolDispatcher
-        (agent/trigger/dispatch.py) only ever sets it for a FatalToolError,
-        which already aborts the run. A RecoverableToolError, an unknown
-        tool, or malformed arguments all come back as a normal observation
-        string the model is meant to read and react to -- dispatch.py's own
-        convention for all of those is to prefix the text with "ERROR", so
-        that's what "ok" checks here too. One real limitation: a tool whose
-        genuinely successful output happens to start with the literal word
-        "ERROR" would be misclassified -- none of this kit's tools do, but a
-        custom tool could.
+        Reads ``step["tool_calls"]``, which has one entry per call. It used
+        to read ``step["action"]``, the flattened first-call-only view, so a
+        turn that called two tools reported one -- and if the *second* one
+        failed, the step still read as a clean success, because the failure
+        text had been concatenated onto the first call's observation. See
+        BUGS.md #16.
+
+        ``step["error"]`` is *not* the right signal for ``ok`` --
+        ToolDispatcher (agent/trigger/dispatch.py) only ever sets it for a
+        FatalToolError, which already aborts the run. A RecoverableToolError,
+        an unknown tool, or malformed arguments all come back as a normal
+        observation string the model is meant to read and react to --
+        dispatch.py's own convention for all of those is to prefix the text
+        with "ERROR", which is what the recorded ``ok`` flag reflects. One
+        real limitation: a tool whose genuinely successful output happens to
+        start with the literal word "ERROR" would be misclassified -- none of
+        this kit's tools do, but a custom tool could.
         """
         summary: List[Dict[str, Any]] = []
         for step in self.trajectory:
+            calls = step.get("tool_calls")
+            if calls:
+                for call in calls:
+                    summary.append({"tool": call.get("name"), "ok": bool(call.get("ok"))})
+                continue
+            # A trajectory from before per-call records existed.
             action = step.get("action")
             if not action:
                 continue
-            ok = step.get("error") is None and not is_failure_observation(step.get("observation"))
+            ok = step.get("error") is None and not is_failure_observation(
+                step.get("observation")
+            )
             summary.append({"tool": action.get("name"), "ok": ok})
         return summary
 
@@ -161,4 +176,11 @@ class MultiAgentRunResult:
     stop_reason: str
     trajectory: List[Dict[str, Any]]
     subagents: List[SubagentResult]
+    #: Set only when the Leader suspended on long-running jobs (see
+    #: :mod:`agent.jobs`). Note the limitation: ``leader_scope`` closes the
+    #: root on exit, so Workers already dispatched are cancelled rather
+    #: than carried across the suspension. Delegation and long-running
+    #: tools are independently useful today but do not yet compose.
+    checkpoint: Optional[Dict[str, Any]] = None
+    pending_job_ids: List[str] = field(default_factory=list)
 

@@ -24,17 +24,51 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from .retry import RetryPolicy, call_with_retry, client_kwargs
+
 
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
 @dataclass
 class ToolCall:
-    """A single tool invocation requested by the model."""
+    """A single tool invocation requested by the model.
+
+    ``arguments`` is normally the decoded JSON object. When the provider
+    sent something that will not decode, it is the raw text instead --
+    see :func:`parse_tool_arguments` for why that is better than ``{}``.
+    """
 
     id: str
     name: str
-    arguments: Dict[str, Any]
+    arguments: Any
+
+
+def parse_tool_arguments(raw: Optional[str]) -> Any:
+    """Decode one tool call's ``arguments`` payload.
+
+    Returns the raw string unchanged when it will not parse. The obvious
+    alternative -- falling back to ``{}`` -- is wrong in a way that is hard
+    to see: ``{}`` is a *valid* call for any tool whose parameters all have
+    defaults, so a truncated or garbled argument list silently becomes a
+    call the model never made, running with defaults it never chose, and
+    nothing in the transcript tells the model its call was malformed. A
+    non-dict lands in :meth:`~agent.trigger.dispatch.ToolDispatcher.dispatch`'s
+    existing recoverable "arguments must be a JSON object" branch instead,
+    which is exactly the intended handling: the model is told, and gets a
+    retry. See BUGS.md #10.
+
+    An empty payload still means ``{}`` -- that is a no-argument call, not
+    a broken one.
+    """
+
+    text = raw or ""
+    if not text.strip():
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
 
 
 @dataclass
@@ -382,6 +416,8 @@ class OpenAILLM(BaseLLM):
         temperature: float = 0.0,
         embed_model: str = "text-embedding-3-small",
         base_url: str | None = None,
+        retry_policy: Optional[RetryPolicy] = None,
+        api_key: str | None = None,
     ) -> None:
         try:
             from openai import OpenAI  # type: ignore
@@ -391,15 +427,19 @@ class OpenAILLM(BaseLLM):
                 "Install it or use MockLLM."
             ) from exc
 
-        api_key = os.environ.get("OPENAI_API_KEY")
+        # An explicit key lets one process talk to several OpenAI-compatible
+        # endpoints at once (see config/agent.yaml's `models:` tiers), which
+        # reading a single fixed env var cannot express.
+        api_key = api_key or os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is not set; use MockLLM instead.")
 
         base_url = base_url or os.environ.get("OPENAI_BASE_URL")
-        client_kwargs: dict[str, Any] = {"api_key": api_key}
+        self.retry_policy = retry_policy or RetryPolicy()
+        kwargs: dict[str, Any] = {"api_key": api_key, **client_kwargs(self.retry_policy)}
         if base_url:
-            client_kwargs["base_url"] = base_url
-        self._client = OpenAI(**client_kwargs)
+            kwargs["base_url"] = base_url
+        self._client = OpenAI(**kwargs)
         self.model = model
         self.temperature = temperature
         self.embed_model = embed_model
@@ -418,17 +458,23 @@ class OpenAILLM(BaseLLM):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
-        resp = self._client.chat.completions.create(**kwargs)
+        resp = call_with_retry(
+            lambda timeout: self._client.chat.completions.create(
+                **kwargs, timeout=timeout
+            ),
+            policy=self.retry_policy,
+            operation="chat",
+        )
         choice = resp.choices[0].message
 
         tool_calls: List[ToolCall] = []
         for tc in choice.tool_calls or []:
-            try:
-                args = json.loads(tc.function.arguments or "{}")
-            except json.JSONDecodeError:
-                args = {}
             tool_calls.append(
-                ToolCall(id=tc.id, name=tc.function.name, arguments=args)
+                ToolCall(
+                    id=tc.id,
+                    name=tc.function.name,
+                    arguments=parse_tool_arguments(tc.function.arguments),
+                )
             )
 
         usage = Usage(
@@ -438,7 +484,13 @@ class OpenAILLM(BaseLLM):
         return LLMResponse(content=choice.content, tool_calls=tool_calls, usage=usage)
 
     def embed(self, text: str) -> List[float]:
-        resp = self._client.embeddings.create(model=self.embed_model, input=text)
+        resp = call_with_retry(
+            lambda timeout: self._client.embeddings.create(
+                model=self.embed_model, input=text, timeout=timeout
+            ),
+            policy=self.retry_policy,
+            operation="embed",
+        )
         return list(resp.data[0].embedding)
 
 
@@ -480,6 +532,7 @@ class DeepSeekLLM(OpenAILLM):
         self,
         model: str | None = None,
         temperature: float = 0.0,
+        retry_policy: Optional[RetryPolicy] = None,
     ) -> None:
         try:
             from openai import OpenAI  # type: ignore
@@ -494,9 +547,11 @@ class DeepSeekLLM(OpenAILLM):
                 "Set DEEPSEEK_API_KEY (or OPENAI_API_KEY) environment variable."
             )
 
+        self.retry_policy = retry_policy or RetryPolicy()
         self._client = OpenAI(
             api_key=api_key,
             base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            **client_kwargs(self.retry_policy),
         )
         self.model = model or self.MODELS["chat"]
         self.temperature = temperature
@@ -516,7 +571,13 @@ class DeepSeekLLM(OpenAILLM):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
-        resp = self._client.chat.completions.create(**kwargs)
+        resp = call_with_retry(
+            lambda timeout: self._client.chat.completions.create(
+                **kwargs, timeout=timeout
+            ),
+            policy=self.retry_policy,
+            operation="chat",
+        )
         choice = resp.choices[0].message
 
         # DeepSeek-R1 emits reasoning_content before the final answer.
@@ -528,12 +589,12 @@ class DeepSeekLLM(OpenAILLM):
 
         tool_calls: List[ToolCall] = []
         for tc in choice.tool_calls or []:
-            try:
-                args = json.loads(tc.function.arguments or "{}")
-            except json.JSONDecodeError:
-                args = {}
             tool_calls.append(
-                ToolCall(id=tc.id, name=tc.function.name, arguments=args)
+                ToolCall(
+                    id=tc.id,
+                    name=tc.function.name,
+                    arguments=parse_tool_arguments(tc.function.arguments),
+                )
             )
 
         usage = Usage(
@@ -547,7 +608,14 @@ class DeepSeekLLM(OpenAILLM):
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
     ):
-        """Stream tokens from DeepSeek via SSE-compatible async generator."""
+        """Stream tokens from DeepSeek via SSE-compatible async generator.
+
+        The retry policy's *timeout* applies here, but its retries do not:
+        a stream that fails partway has already yielded tokens the caller
+        forwarded to a browser, so a second attempt would re-emit them as
+        duplicates. Streaming failures are surfaced to the caller instead --
+        deliberately, not an oversight.
+        """
         try:
             from openai import AsyncOpenAI
         except ImportError:
@@ -558,6 +626,7 @@ class DeepSeekLLM(OpenAILLM):
         aclient = AsyncOpenAI(
             api_key=self._client.api_key,
             base_url=str(self._client.base_url),
+            **client_kwargs(self.retry_policy),
         )
         kwargs: Dict[str, Any] = {
             "model": self.model,
@@ -600,13 +669,13 @@ class DeepSeekLLM(OpenAILLM):
             if chunk.choices[0].finish_reason == "tool_calls":
                 for idx in sorted(tool_call_buf):
                     tc = tool_call_buf[idx]
-                    try:
-                        args = json.loads(tc["arguments"])
-                    except json.JSONDecodeError:
-                        args = {}
                     yield {
                         "type": "tool_call",
-                        "data": {"id": tc["id"], "name": tc["name"], "arguments": args},
+                        "data": {
+                            "id": tc["id"],
+                            "name": tc["name"],
+                            "arguments": parse_tool_arguments(tc["arguments"]),
+                        },
                     }
 
     def embed(self, text: str) -> List[float]:
@@ -663,6 +732,7 @@ class BailianLLM(OpenAILLM):
         model: str | None = None,
         temperature: float = 0.0,
         embed_model: str | None = None,
+        retry_policy: Optional[RetryPolicy] = None,
     ) -> None:
         try:
             from openai import OpenAI  # type: ignore
@@ -681,7 +751,10 @@ class BailianLLM(OpenAILLM):
             "BAILIAN_BASE_URL",
             "https://dashscope.aliyuncs.com/compatible-mode/v1",
         )
-        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        self.retry_policy = retry_policy or RetryPolicy()
+        self._client = OpenAI(
+            api_key=api_key, base_url=base_url, **client_kwargs(self.retry_policy)
+        )
         self.model = model or self.MODELS["chat"]
         self.temperature = temperature
         self.embed_model = (

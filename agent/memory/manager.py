@@ -176,12 +176,18 @@ class MemoryManager:
         for hit in hits:
             if min_score is not None and hit.score < min_score:
                 continue
-            record = self.repository.get(hit.record_id)
-            if record is None or record.status != MemoryStatus.ACTIVE:
+            # One conditional, store-side update instead of get / mutate /
+            # update: the status check and the write have to be atomic, or
+            # a delete landing between them is undone by this read's stale
+            # snapshot. `None` means the record was deleted, expired or
+            # superseded since the vector index last saw it -- the index is
+            # derived data and is allowed to lag, the repository is not.
+            # See BUGS.md #13.
+            record = self.repository.touch_if_active(
+                hit.record_id, accessed_at=utc_now()
+            )
+            if record is None:
                 continue
-            record.last_accessed_at = utc_now()
-            record.updated_at = record.last_accessed_at
-            self.repository.update(record)
             results.append(
                 MemorySearchResult(record=record, semantic_score=hit.score)
             )

@@ -10,7 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        # 3.9 was listed but never actually installable: requirements.txt
+        # depends on mcp 2.x, which declares Requires-Python >=3.10. See
+        # BUGS.md #19.
+        python-version: ["3.10", "3.11", "3.12"]
 
     steps:
       - uses: actions/checkout@v4

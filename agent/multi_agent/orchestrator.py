@@ -91,11 +91,17 @@ class MultiAgentOrchestrator:
 
         return create_leader_tools(self)
 
-    def run_leader(self, leader: ReActAgent, task: str) -> MultiAgentRunResult:
+    def run_leader(
+        self,
+        leader: ReActAgent,
+        task: str,
+        *,
+        resume_from: Optional[Dict[str, object]] = None,
+    ) -> MultiAgentRunResult:
         """Run a Leader with an isolated root id and clean up orphan Workers."""
 
         with self.leader_scope() as root_run_id:
-            leader_result = leader.run(task)
+            leader_result = leader.run(task, resume_from=resume_from)
 
         subagents = self.results_for_run(root_run_id)
         return MultiAgentRunResult(
@@ -107,6 +113,8 @@ class MultiAgentOrchestrator:
             stop_reason=leader_result.stop_reason,
             trajectory=leader_result.trajectory,
             subagents=subagents,
+            checkpoint=getattr(leader_result, "checkpoint", None),
+            pending_job_ids=list(getattr(leader_result, "pending_job_ids", []) or []),
         )
 
     @contextmanager

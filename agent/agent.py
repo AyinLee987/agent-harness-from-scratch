@@ -30,6 +30,7 @@ from .safety import ToolOutputGuard
 from .state.memory import LongTermMemory, ShortTermMemory
 from .tools import ToolRegistry
 from .trigger.react_loop import DEFAULT_SYSTEM_PROMPT, AgentResult, ReActLoop
+from .trigger.tool_router import ToolSelector
 
 
 class ReActAgent:
@@ -60,6 +61,7 @@ class ReActAgent:
         memory_namespace: str = "default",
         memory_subject_id: str = "anonymous",
         context_providers: Optional[Sequence[ContextProvider]] = None,
+        tool_selector: Optional[ToolSelector] = None,
     ) -> None:
         self._loop = ReActLoop(
             llm=llm,
@@ -81,27 +83,60 @@ class ReActAgent:
             memory_namespace=memory_namespace,
             memory_subject_id=memory_subject_id,
             context_providers=context_providers,
+            tool_selector=tool_selector,
         )
-        # Expose attributes for backward compatibility.
-        self.llm = llm
-        self.tools = tools
-        self.system_prompt = system_prompt
-        self.max_steps = max_steps
-        self.max_tokens = max_tokens
-        self.short_term = self._loop.short_term
-        self.long_term = long_term
-        self.compressor = compressor
-        self.output_guard = output_guard
-        self.agent_name = agent_name
-        self.memory_manager = memory_manager
-        self.memory_namespace = memory_namespace
-        self.memory_subject_id = memory_subject_id
-        self.context_providers = list(context_providers or [])
 
     def run(
         self,
         task: str,
         cancellation_event: Optional[threading.Event] = None,
+        resume_from: Optional[Dict[str, Any]] = None,
     ) -> AgentResult:
-        """Run the agent to completion on ``task``."""
-        return self._loop.run(task, cancellation_event=cancellation_event)
+        """Run the agent to completion on ``task``.
+
+        ``resume_from`` continues a run that suspended on a long-running
+        job -- see :meth:`agent.trigger.ReActLoop.run`.
+        """
+        return self._loop.run(
+            task, cancellation_event=cancellation_event, resume_from=resume_from
+        )
+
+
+# -- delegated attributes ---------------------------------------------------
+# These used to be plain copies assigned in ``__init__`` and labelled
+# "exposed for backward compatibility". That made them true in one direction
+# only: reading worked, but *writing* one changed just the copy while
+# ``ReActLoop`` went on reading its own -- silently, with no error and no
+# warning. ``AgentGateway.run()``'s per-request ``agent.max_steps = n``
+# override was doing exactly that and had no effect at all. Properties keep
+# the identical read API and make writes actually land. See BUGS.md #14.
+_DELEGATED = (
+    "llm",
+    "tools",
+    "system_prompt",
+    "max_steps",
+    "max_tokens",
+    "short_term",
+    "long_term",
+    "compressor",
+    "output_guard",
+    "agent_name",
+    "memory_manager",
+    "memory_namespace",
+    "memory_subject_id",
+    "context_providers",
+    "tool_selector",
+)
+
+
+def _delegate(name: str) -> property:
+    return property(
+        lambda self: getattr(self._loop, name),
+        lambda self, value: setattr(self._loop, name, value),
+        doc=f"Delegates to :attr:`~agent.trigger.ReActLoop.{name}`.",
+    )
+
+
+for _attribute in _DELEGATED:
+    setattr(ReActAgent, _attribute, _delegate(_attribute))
+del _attribute

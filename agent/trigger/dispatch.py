@@ -11,7 +11,12 @@ import time
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-from ..errors import FatalToolError, RecoverableToolError, ToolCallError
+from ..errors import (
+    ControlSignal,
+    FatalToolError,
+    RecoverableToolError,
+    ToolCallError,
+)
 from ..observability import get_logger, log_event
 from ..state.context import ExecutionContext
 from ..tools import ToolRegistry
@@ -125,13 +130,21 @@ class ToolDispatcher:
                 logging.WARNING,
             )
 
-        # Malformed arguments — must be a dict.
+        # Malformed arguments — must be a dict. A raw string arrives here
+        # when the provider sent JSON that would not decode: see
+        # agent.llm.parse_tool_arguments for why that is passed through
+        # rather than flattened to an empty (and therefore *valid*) call.
         if not isinstance(arguments, dict):
             ctx.state[retry_key] = retries + 1
+            received = (
+                f" The arguments received were not valid JSON: {arguments[:200]!r}."
+                if isinstance(arguments, str)
+                else f" Received a {type(arguments).__name__}."
+            )
             if retries < self.max_retries:
                 return finish((
-                    f"ERROR: arguments for '{name}' must be a JSON object. "
-                    f"Please retry."
+                    f"ERROR: arguments for '{name}' must be a JSON object."
+                    f"{received} Please retry with a complete JSON object."
                 ), "malformed_arguments", logging.WARNING)
             return finish(
                 f"ERROR: malformed arguments for '{name}' after retry; giving up.",
@@ -143,6 +156,19 @@ class ToolDispatcher:
         streak_key = _source_streak_key(name, arguments)
         try:
             result = self.registry.dispatch(name, arguments)
+        except ControlSignal:
+            # Not a failure -- the tool is telling the loop to do something
+            # else (today: suspend and wait on jobs). Classifying it as an
+            # error would both mislabel it and hide the instruction. See
+            # agent/errors.py's ControlSignal.
+            log_event(
+                logger,
+                logging.INFO,
+                "tool.call.signalled",
+                tool_name=name,
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+            )
+            raise
         except RecoverableToolError as exc:
             message = f"ERROR calling '{name}': {exc}"
             if streak_key is not None:

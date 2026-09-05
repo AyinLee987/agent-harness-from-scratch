@@ -1,20 +1,36 @@
+# Requires Python 3.10+. The `mcp` SDK below declares `Requires-Python:
+# >=3.10`, so 3.9 cannot install this file at all -- the CI matrix used to
+# claim 3.9 support anyway, and the `; python_version >= "3.10"` markers on
+# the optional packages hid the problem by making 3.9 look merely
+# feature-reduced rather than broken. See BUGS.md #19.
+
 # Core runtime dependency: NumPy powers the in-memory vector store.
 numpy>=1.24
 
 # Loads config/agent.yaml (app/config.py) -- the Leader/Worker run-tuning file.
 PyYAML>=6.0
 
-# Generic MCP client integration. MCP SDK v2 requires Python 3.10+.
+# Generic MCP client integration.
 mcp>=2.0,<3
+
+# The HTTP server (app/server.py) and the SSE playground it serves.
+# Previously undeclared: `mcp` pulls in starlette/uvicorn but NOT fastapi,
+# so a clean install could not import app.server -- and five test modules
+# do, via fastapi.testclient. Local runs passed only because fastapi
+# happened to be installed already.
+fastapi>=0.110
+uvicorn>=0.27
+# fastapi.testclient requires httpx at runtime; it is not a fastapi dep.
+httpx>=0.27
 
 # Optional: only needed to run against a real model via OpenAILLM.
 # The repo runs fully (and CI passes) without this, using MockLLM.
-openai>=1.0 ; python_version >= "3.10"
+openai>=1.0
 
 # Optional: only needed for ChromaVectorStore (agent/state/chroma_store.py).
 # The repo runs fully (and CI passes) without this -- LongTermMemory and
 # DenseRetriever both default to NumPyVectorStore.
-chromadb>=0.5 ; python_version >= "3.10"
+chromadb>=0.5
 
 # Dev / test
 pytest>=7.0

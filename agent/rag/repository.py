@@ -54,11 +54,25 @@ class InMemoryRAGRepository:
             return copy.deepcopy(item) if item else None
 
     def find_by_checksum(self, checksum: str) -> Optional[Document]:
+        """The live document with this content, else the most recent one.
+
+        Once identical content can exist at more than one version (see
+        ``RAGIngestionService`` and BUGS.md #20), "any row with this
+        checksum" is ambiguous. ACTIVE wins, because a caller asking
+        whether this content is already indexed is asking about the
+        effective version.
+        """
+
         with self._lock:
-            for item in self._documents.values():
-                if item.checksum == checksum and item.status != DocumentStatus.FAILED:
-                    return copy.deepcopy(item)
-        return None
+            matches = [
+                item
+                for item in self._documents.values()
+                if item.checksum == checksum and item.status != DocumentStatus.FAILED
+            ]
+        if not matches:
+            return None
+        active = [item for item in matches if item.status == DocumentStatus.ACTIVE]
+        return copy.deepcopy((active or matches)[-1])
 
     def list_documents(self, status: Optional[DocumentStatus] = None) -> List[Document]:
         with self._lock:
@@ -178,10 +192,21 @@ class SQLiteRAGRepository:
         return self._decode_document(row["payload"]) if row else None
 
     def find_by_checksum(self, checksum: str) -> Optional[Document]:
+        """The live document with this content, else the most recent one.
+
+        See :meth:`InMemoryRAGRepository.find_by_checksum` -- the two must
+        agree, and ``ORDER BY rowid DESC`` alone did not prefer ACTIVE.
+        """
+
         with self._lock:
             row = self._connection.execute(
                 "SELECT payload FROM rag_documents WHERE checksum=? AND status!=? "
-                "ORDER BY rowid DESC LIMIT 1", (checksum, DocumentStatus.FAILED.value),
+                "ORDER BY (status=?) DESC, rowid DESC LIMIT 1",
+                (
+                    checksum,
+                    DocumentStatus.FAILED.value,
+                    DocumentStatus.ACTIVE.value,
+                ),
             ).fetchone()
         return self._decode_document(row["payload"]) if row else None
 

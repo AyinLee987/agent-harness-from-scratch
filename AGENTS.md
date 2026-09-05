@@ -134,6 +134,28 @@ Unclassified exceptions are treated as fatal by the dispatcher — so an
 un-caught library exception inside a tool is a bug to fix (classify it),
 not a gap to leave.
 
+**Control signals are a separate hierarchy, not a third failure tier.**
+`ControlSignal` (also in `errors.py`) is for a tool telling the *loop* to
+do something other than take another step, when nothing has gone wrong:
+`SuspendRun` and `JobCancelled` (`agent/jobs/`) are the two today. They
+propagate untouched through `FunctionTool.run` and
+`ToolDispatcher.dispatch`, both of which otherwise classify every exception
+they see. Keep the two hierarchies disjoint — the tool taxonomy answers
+"how bad was this failure", a control signal answers "what should the loop
+do instead", and merging them would make the two-tier failure contract stop
+meaning anything. A new signal subclasses `ControlSignal` and gets an
+explicit `except` in whichever loop node acts on it; it never gets a
+`RecoverableToolError` alias. (`JobCancelled` was originally a plain
+`Exception` and `FunctionTool` duly reclassified it as a `FatalToolError`,
+which logged every deliberate cancellation as `job.failed` — see BUGS.md
+#7 for why this rule is written down rather than assumed.)
+
+There is a matching split on the LLM side, same shape for the same reason:
+`agent/retry.py` classifies provider failures into `TransientLLMError`
+(the request was fine, the provider was not) and `PermanentLLMError` (the
+provider rejected the request itself, so retrying cannot help). The loop
+degrades around the first and lets the second propagate.
+
 ## 7. Observability
 
 Structured, stdlib-only logging via `get_logger(__name__)` +
@@ -159,6 +181,37 @@ conditions on `ExecutionContext` — not a comment saying "the model should
 stop when it's done." If you add a new loop or a new resource the agent can
 consume unboundedly, add an explicit, testable limit for it in the same
 change, following the existing `over_budget()` / `budget_reason()` shape.
+
+A limit must also bound the thing it names. Two ways this went wrong, both
+in BUGS.md: `total_deadline_seconds` was checked only against the *backoff*,
+so an attempt could run past it (#15); `max_tokens` was checked only against
+tokens already *spent*, so one call's prompt could overshoot it without
+limit (#21). If a ceiling cannot be exact — `max_tokens` cannot, since
+nothing knows the completion size before the call — say so where it is
+enforced and bound the error, rather than leaving the gap unstated.
+
+## 8.1 State transitions belong in the store, not above it
+
+A guard of the shape `x = store.get(id)` / `if x.is_final: return` /
+`store.put(x)` is a check-then-act race, and the version of it that hurts is
+the one where a *benign* write (a progress heartbeat, an access timestamp)
+resurrects a *terminal* one (a cancellation, a deletion). Both happened
+here: BUGS.md #12 turned a cancelled job back into `RUNNING`, #13 turned a
+deleted memory back into `ACTIVE`.
+
+So: when a store has states that must not be walked back, give it the
+conditional primitive (`put_if_not_terminal`, `touch_if_active`) and let the
+implementation hold its own lock or put the predicate in the `WHERE` clause.
+Prefer a *partial* update for a field like a heartbeat — a whole-row write
+carries every other field's stale value with it, whether or not it races.
+
+## 8.2 A facade attribute must delegate, not copy
+
+`ReActAgent` re-exports `ReActLoop`'s attributes. Copying them in `__init__`
+made reads work and writes silently vanish, so `AgentGateway`'s per-request
+`max_steps` override did nothing at all — no error, no log (BUGS.md #14).
+Re-export with a property that reads *and* writes through, or do not
+re-export it.
 
 ## 9. Tests
 

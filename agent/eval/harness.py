@@ -15,12 +15,16 @@ each task runs with a fresh agent (clean memory and context).
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from ..agent import AgentResult, ReActAgent
 from ..llm import BaseLLM
+from ..observability import get_logger, log_event
+
+logger = get_logger(__name__)
 
 # Default task set shipped with the repo.
 DEFAULT_TASKS_PATH = os.path.join(os.path.dirname(__file__), "tasks.json")
@@ -150,11 +154,42 @@ class EvalHarness:
     # -- scoring ----------------------------------------------------------
     @staticmethod
     def _rule_score(task: Dict[str, Any], outcome: AgentResult) -> bool:
+        """Whether this task passed: content, clean finish, and the tool.
+
+        ``expect_tool`` counts here, not only in the trajectory score. It
+        was previously computed and then dropped, so a task that declared a
+        required tool passed on substrings alone -- an answer reached
+        without ever calling the tool the task exists to exercise scored
+        identically to one that used it. See BUGS.md #17.
+        """
+
         answer = outcome.answer.lower()
         substrings = task.get("expect_substrings", [])
         substrings_ok = all(s.lower() in answer for s in substrings)
         # The agent must also have actually finished, not just been force-stopped.
-        return substrings_ok and outcome.stop_reason == "finished"
+        if not (substrings_ok and outcome.stop_reason == "finished"):
+            return False
+        used = EvalHarness._used_expected_tool(task, outcome)
+        return used is not False
+
+    @staticmethod
+    def _tool_names(outcome: AgentResult) -> List[str]:
+        """Every tool called in the run, one entry per call.
+
+        Reads the per-call records; a turn with two tool calls used to be
+        visible only as its first one. See BUGS.md #16.
+        """
+
+        names: List[str] = []
+        for step in outcome.trajectory:
+            calls = step.get("tool_calls")
+            if calls:
+                names.extend(str(call.get("name")) for call in calls if call.get("name"))
+                continue
+            action = step.get("action")
+            if action and action.get("name"):
+                names.append(str(action["name"]))
+        return names
 
     @staticmethod
     def _used_expected_tool(
@@ -163,11 +198,7 @@ class EvalHarness:
         expected = task.get("expect_tool")
         if not expected:
             return None
-        for step in outcome.trajectory:
-            action = step.get("action")
-            if action and action.get("name") == expected:
-                return True
-        return False
+        return expected in EvalHarness._tool_names(outcome)
 
     @staticmethod
     def _trajectory_score(task: Dict[str, Any], outcome: AgentResult) -> float:
@@ -184,26 +215,40 @@ class EvalHarness:
 
         expected = task.get("expect_tool")
         if expected:
-            used = any(
-                (s.get("action") or {}).get("name") == expected
-                for s in outcome.trajectory
-            )
+            used = expected in EvalHarness._tool_names(outcome)
             components.append(1.0 if used else 0.0)
 
         had_error = any(
-            (s.get("observation") or "").startswith("ERROR") for s in outcome.trajectory
+            not call.get("ok", True)
+            for step in outcome.trajectory
+            for call in (step.get("tool_calls") or [])
+        ) or any(
+            (step.get("observation") or "").startswith("ERROR")
+            for step in outcome.trajectory
+            if not step.get("tool_calls")
         )
         components.append(0.0 if had_error else 1.0)
 
         return sum(components) / len(components)
 
     def _judge_score(self, task: Dict[str, Any], outcome: AgentResult) -> bool:
+        """Grade one answer with a model, strictly.
+
+        The verdict is the *first token* matched against an enumeration.
+        Substring matching on ``"pass"`` -- what this used to do -- reads a
+        refusal to grade ("I cannot say whether this would pass") as a
+        pass, and a hedged verdict scores the same as a clean one. A reply
+        that is neither PASS nor FAIL is a grading failure, and a grading
+        failure must not count as a success, so it is FAIL. See BUGS.md #18.
+        """
+
         assert self.judge_llm is not None
         prompt = [
             {
                 "role": "system",
-                "content": "You are a strict grader. Reply with only 'PASS' or "
-                "'FAIL'. PASS only if the answer correctly addresses the task.",
+                "content": "You are a strict grader. Reply with exactly one "
+                "word, 'PASS' or 'FAIL', and nothing else. PASS only if the "
+                "answer correctly addresses the task.",
             },
             {
                 "role": "user",
@@ -211,7 +256,18 @@ class EvalHarness:
             },
         ]
         resp = self.judge_llm.chat(prompt, tools=[])
-        return "pass" in (resp.content or "").strip().lower()
+        verdict = (resp.content or "").strip().strip(".'\"*` ").lower()
+        first = verdict.split()[0] if verdict.split() else ""
+        if first in ("pass", "fail"):
+            return first == "pass"
+        log_event(
+            logger,
+            logging.WARNING,
+            "eval.judge.invalid_verdict",
+            task_id=task.get("id"),
+            reply_chars=len(resp.content or ""),
+        )
+        return False
 
     @staticmethod
     def _aggregate(results: List[TaskResult]) -> Scorecard:

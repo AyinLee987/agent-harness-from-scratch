@@ -24,10 +24,24 @@ from .agent import AgentResult, ReActAgent
 from .compression import CompressionResult, ContextCompressor
 from .context import ContextProvider
 from .errors import (
+    ControlSignal,
     FatalToolError,
     RecoverableToolError,
     RespondToModel,
     ToolCallError,
+)
+from .jobs import (
+    InMemoryJobStore,
+    Job,
+    JobBudget,
+    JobContext,
+    JobRunner,
+    JobStatus,
+    JobStore,
+    LongRunningTool,
+    SQLiteJobStore,
+    SuspendRun,
+    create_job_tools,
 )
 from .llm import (
     BailianLLM,
@@ -96,6 +110,13 @@ from .observability import (
     run_log_file,
     sanitize,
 )
+from .retry import (
+    LLMCallError,
+    PermanentLLMError,
+    RetryPolicy,
+    TransientLLMError,
+    call_with_retry,
+)
 from .rag import (
     BM25Retriever, CallableReranker, Chunk, Citation, CitationCounter, DenseRetriever, Document,
     DocumentStatus, Evidence, EvidenceBundle, EvidenceConflict, EvidenceStatus,
@@ -107,8 +128,12 @@ from .rag import (
 from .safety import ScanResult, ToolOutputGuard
 from .state import (
     BaseVectorStore,
+    CheckpointStore,
     ChromaVectorStore,
     ExecutionContext,
+    InMemoryCheckpointStore,
+    RunCheckpoint,
+    SQLiteCheckpointStore,
     LongTermMemory,
     MemoryRecord as LegacyMemoryRecord,
     NumPyVectorStore,
@@ -119,16 +144,30 @@ from .state import (
 )
 from .tools import BaseTool, FunctionTool, ToolRegistry, tool
 from .trigger import (
+    Admission,
     AgentGateway,
+    AllToolsSelector,
     ConcurrencyGuard,
+    DIRECT_SYSTEM_PROMPT,
+    LexicalToolSelector,
+    ToolSelection,
+    ToolSelector,
+    filtered_schemas,
+    ESCALATION_SENTINEL,
     FORCED_REFLECTION_PROMPT,
+    LLMQueryRouter,
+    QueryRouter,
     RateLimiter,
     ReActLoop,
     REFLECT_AFTER_FAILURE_STATE_KEY,
     RequestQueue,
+    Route,
+    RunPlan,
     StateGraph,
+    StaticRouter,
     ToolDispatcher,
     is_failure_observation,
+    wants_escalation,
 )
 from .trigger.gateway import (
     ConcurrencyLimitExceeded,
@@ -152,10 +191,26 @@ __all__ = [
     "is_failure_observation",
     "FORCED_REFLECTION_PROMPT",
     "REFLECT_AFTER_FAILURE_STATE_KEY",
+    "Admission",
     "AgentGateway",
     "ConcurrencyGuard",
     "RateLimiter",
     "RequestQueue",
+    # Tool routing
+    "ToolSelector",
+    "AllToolsSelector",
+    "LexicalToolSelector",
+    "ToolSelection",
+    "filtered_schemas",
+    # Intent routing
+    "QueryRouter",
+    "LLMQueryRouter",
+    "StaticRouter",
+    "Route",
+    "RunPlan",
+    "DIRECT_SYSTEM_PROMPT",
+    "ESCALATION_SENTINEL",
+    "wants_escalation",
     "GatewayError",
     "GatewayResult",
     "RateLimitExceeded",
@@ -232,6 +287,10 @@ __all__ = [
     "SQLiteVectorStore",
     "ChromaVectorStore",
     "VectorStoreConfigurationError",
+    "CheckpointStore",
+    "InMemoryCheckpointStore",
+    "SQLiteCheckpointStore",
+    "RunCheckpoint",
     # LLM
     "BaseLLM",
     "LLMResponse",
@@ -241,6 +300,12 @@ __all__ = [
     "BailianLLM",
     "ToolCall",
     "Usage",
+    # Provider call resilience
+    "RetryPolicy",
+    "call_with_retry",
+    "LLMCallError",
+    "TransientLLMError",
+    "PermanentLLMError",
     # Local workspace tools
     "LocalToolConfig", "ReadFileTool", "WriteFileTool", "ListFilesTool",
     "RunCommandTool", "create_local_tools",
@@ -249,8 +314,21 @@ __all__ = [
     "CompressionResult",
     "ToolOutputGuard",
     "ScanResult",
+    # Long-running tools
+    "Job",
+    "JobStatus",
+    "JobStore",
+    "InMemoryJobStore",
+    "SQLiteJobStore",
+    "JobRunner",
+    "JobBudget",
+    "JobContext",
+    "LongRunningTool",
+    "SuspendRun",
+    "create_job_tools",
     # Tools
     "ToolCallError",
+    "ControlSignal",
     "RecoverableToolError",
     "RespondToModel",
     "FatalToolError",

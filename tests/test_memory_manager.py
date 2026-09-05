@@ -231,8 +231,11 @@ def test_openai_compatible_embedding_provider_is_independent_and_batched():
             self.embedding = embedding
 
     class Embeddings:
-        def create(self, *, model, input):
+        def create(self, *, model, input, timeout=None):
             assert model == "medical-embedding"
+            # call_with_retry hands each attempt its own deadline; the
+            # provider must actually receive it.
+            assert timeout is not None and timeout > 0
             return type(
                 "Response",
                 (),

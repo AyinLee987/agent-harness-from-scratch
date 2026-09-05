@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, List, Optional, Protocol, Sequence, runtime_checkable
 
 from ..llm import BaseLLM
+from ..retry import RetryPolicy, call_with_retry, client_kwargs
 from .errors import MemoryConfigurationError
 
 
@@ -69,6 +70,10 @@ class OpenAICompatibleEmbeddingProvider:
 
     The chat model may use an entirely different provider. ``client`` is
     injectable for tests; otherwise the optional ``openai`` package is used.
+
+    An injected ``client`` is used exactly as given -- ``retry_policy`` still
+    governs :func:`~agent.retry.call_with_retry` around each request, but the
+    caller owns that client's own timeout settings.
     """
 
     def __init__(
@@ -80,7 +85,9 @@ class OpenAICompatibleEmbeddingProvider:
         dimension: Optional[int] = None,
         provider_name: str = "openai-compatible",
         client: Any = None,
+        retry_policy: Optional[RetryPolicy] = None,
     ) -> None:
+        self.retry_policy = retry_policy or RetryPolicy()
         if client is None:
             try:
                 from openai import OpenAI
@@ -88,7 +95,7 @@ class OpenAICompatibleEmbeddingProvider:
                 raise MemoryConfigurationError(
                     "OpenAICompatibleEmbeddingProvider requires the 'openai' package."
                 ) from exc
-            kwargs: dict[str, Any] = {}
+            kwargs: dict[str, Any] = dict(client_kwargs(self.retry_policy))
             if api_key is not None:
                 kwargs["api_key"] = api_key
             if base_url is not None:
@@ -119,7 +126,13 @@ class OpenAICompatibleEmbeddingProvider:
         return self._embed_many(values) if values else []
 
     def _embed_many(self, texts: List[str]) -> List[List[float]]:
-        response = self._client.embeddings.create(model=self.model, input=texts)
+        response = call_with_retry(
+            lambda timeout: self._client.embeddings.create(
+                model=self.model, input=texts, timeout=timeout
+            ),
+            policy=self.retry_policy,
+            operation="embed",
+        )
         items = sorted(response.data, key=lambda item: getattr(item, "index", 0))
         vectors = [list(item.embedding) for item in items]
         if len(vectors) != len(texts):

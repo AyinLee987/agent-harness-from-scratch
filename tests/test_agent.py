@@ -379,6 +379,62 @@ def test_unclassified_tool_exception_is_fatal_by_default():
     assert "unexpected bug" in result.answer
 
 
+def test_an_unavailable_provider_ends_the_run_without_discarding_the_trajectory():
+    """A ``TransientLLMError`` mid-run must not propagate out of ``run()``.
+
+    Letting it escape throws away every tool observation already collected
+    plus the token accounting -- the caller learns only that *something*
+    failed. The run should end with ``stop_reason='llm_unavailable'`` and
+    the partial trajectory intact.
+    """
+
+    from agent.llm import LLMResponse, ToolCall, Usage
+    from agent.retry import TransientLLMError
+
+    @tool
+    def echo(text: str) -> str:
+        """Echo back."""
+        return text
+
+    class FlakyProviderLLM(MockLLM):
+        calls = 0
+
+        def chat(self, messages, tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResponse(
+                    tool_calls=[
+                        ToolCall(id="e", name="echo", arguments={"text": "hello"})
+                    ],
+                    usage=Usage(3, 4),
+                )
+            raise TransientLLMError("provider unavailable after 3 attempts")
+
+    result = ReActAgent(llm=FlakyProviderLLM(), tools=ToolRegistry([echo])).run("go")
+
+    assert not result.success
+    assert result.stop_reason == "llm_unavailable"
+    assert result.tokens == 7
+    assert any(step["observation"] == "hello" for step in result.trajectory)
+    assert "hello" in result.answer
+    assert "unavailable" in result.trajectory[-1]["error"]
+
+
+def test_a_rejected_request_still_propagates_as_a_bug_to_fix():
+    """``PermanentLLMError`` is deliberately *not* degraded around: a request
+    the provider rejects outright (BUGS.md #1's shape) is a defect, and
+    swallowing it would hide it behind a plausible-looking partial answer."""
+
+    from agent.retry import PermanentLLMError
+
+    class RejectedLLM(MockLLM):
+        def chat(self, messages, tools=None):
+            raise PermanentLLMError("400: orphaned tool message")
+
+    with pytest.raises(PermanentLLMError):
+        ReActAgent(llm=RejectedLLM(), tools=ToolRegistry([])).run("go")
+
+
 def test_decorator_can_classify_operation_errors_as_recoverable():
     @tool(error_policy="recoverable")
     def remote_operation() -> str:

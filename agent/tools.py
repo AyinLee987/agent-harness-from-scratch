@@ -12,11 +12,14 @@ client expects, and dispatches calls by name.
 
 from __future__ import annotations
 
+import collections.abc
 import inspect
+import types
+import typing
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Literal, Optional, get_args, get_origin, get_type_hints
 
-from .errors import FatalToolError, RecoverableToolError, ToolCallError
+from .errors import ControlSignal, FatalToolError, RecoverableToolError, ToolCallError
 
 
 # Map Python types to JSON-schema primitive types.
@@ -30,21 +33,79 @@ _PY_TO_JSON: Dict[Any, str] = {
 }
 
 
-def _json_type(annotation: Any) -> str:
-    """Best-effort mapping from a type annotation to a JSON-schema type."""
+_SEQUENCE_ORIGINS = (
+    list,
+    set,
+    frozenset,
+    tuple,
+    collections.abc.Sequence,
+    collections.abc.Set,
+    collections.abc.MutableSequence,
+)
+_MAPPING_ORIGINS = (dict, collections.abc.Mapping, collections.abc.MutableMapping)
 
-    if annotation is inspect.Parameter.empty:
-        return "string"
+
+def _json_schema(annotation: Any) -> Dict[str, Any]:
+    """Best-effort JSON-schema fragment for one parameter annotation.
+
+    A container keeps its *container* type and describes its members
+    separately. The earlier version treated everything with a
+    ``get_origin()`` as a Union and returned the first type argument, so
+    ``list[int]`` was advertised to the model as ``integer`` and
+    ``dict[str, int]`` as ``string`` -- a model following that schema sends
+    a bare scalar where the tool binds a container, which surfaces as a
+    confusing ``TypeError`` from inside the tool rather than as a schema
+    problem. See BUGS.md #9.
+    """
+
+    if annotation is inspect.Parameter.empty or annotation is Any:
+        return {"type": "string"}
+
     origin = get_origin(annotation)
-    if origin is not None:
-        # Optional[X] / Union[...] -> use the first non-None arg.
-        if origin is type(None):
-            return "string"
-        args = [a for a in get_args(annotation) if a is not type(None)]
-        if args:
-            return _json_type(args[0])
-        return "string"
-    return _PY_TO_JSON.get(annotation, "string")
+    if origin is None:
+        return {"type": _PY_TO_JSON.get(annotation, "string")}
+
+    args = get_args(annotation)
+
+    # Literal["a", "b"] -> an enum, which is the single most useful thing a
+    # tool schema can tell a model: it removes the guess entirely.
+    if origin is Literal:
+        values = [value for value in args]
+        member = _PY_TO_JSON.get(type(values[0]), "string") if values else "string"
+        return {"type": member, "enum": values}
+
+    # Optional[X] / Union[...] and the 3.10+ ``X | None`` spelling, which has
+    # a different origin (types.UnionType) than typing.Union.
+    if origin is typing.Union or origin is getattr(types, "UnionType", None):
+        members = [arg for arg in args if arg is not type(None)]
+        if not members:
+            return {"type": "string"}
+        schema = _json_schema(members[0])
+        if len(members) > 1:
+            # Not expressible as one type; the first member is the honest
+            # best guess and stays consistent with the pre-fix behaviour.
+            return schema
+        return schema
+
+    if origin in _SEQUENCE_ORIGINS:
+        # tuple[int, str] is heterogeneous -- describing it as an array of
+        # ints would be a lie, so it gets an untyped array instead.
+        element_args = [arg for arg in args if arg is not Ellipsis]
+        homogeneous = len(set(element_args)) == 1 if element_args else False
+        schema: Dict[str, Any] = {"type": "array"}
+        if homogeneous:
+            schema["items"] = _json_schema(element_args[0])
+        return schema
+
+    if origin in _MAPPING_ORIGINS:
+        schema = {"type": "object"}
+        if len(args) == 2:
+            schema["additionalProperties"] = _json_schema(args[1])
+        return schema
+
+    # An unrecognized generic (a custom Generic, say). Fall back to the
+    # origin's own primitive rather than to its type parameters.
+    return {"type": _PY_TO_JSON.get(origin, "string")}
 
 
 def _parse_docstring(doc: Optional[str]) -> tuple[str, Dict[str, str]]:
@@ -145,7 +206,7 @@ class FunctionTool(BaseTool):
             ):
                 continue
             annotation = self._hints.get(pname, param.annotation)
-            prop: Dict[str, Any] = {"type": _json_type(annotation)}
+            prop: Dict[str, Any] = _json_schema(annotation)
             if pname in self._param_docs:
                 prop["description"] = self._param_docs[pname]
             properties[pname] = prop
@@ -159,6 +220,10 @@ class FunctionTool(BaseTool):
         self._signature.bind(**kwargs)
         try:
             return str(self._func(**kwargs))
+        except ControlSignal:
+            # A control decision, not a failure -- classifying it would turn
+            # "suspend this run" into "this tool errored". See errors.py.
+            raise
         except ToolCallError:
             raise
         except Exception as exc:

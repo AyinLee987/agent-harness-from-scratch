@@ -1,4 +1,18 @@
-"""Persistent MCP client sessions bridged into the synchronous agent runtime."""
+"""Persistent MCP client sessions bridged into the synchronous agent runtime.
+
+The bridge is one background thread owning one asyncio event loop, with a
+queue in front of it: synchronous callers (the ReAct loop's tool dispatch,
+on whatever thread it happens to be running) hand work in and block on a
+``concurrent.futures.Future``. That shape is deliberate -- it keeps the
+async-ness entirely inside this module, so nothing above it in the stack
+(``ToolRegistry``, ``ToolDispatcher``, ``ReActLoop``) has to become async
+to use an MCP tool.
+
+Calls are dispatched as independent tasks on that loop rather than awaited
+one at a time, so N Workers calling MCP tools in parallel actually overlap;
+per-server concurrency is bounded by ``max_concurrent_calls`` and the wait
+for a slot by ``slot_wait_timeout``, both on :class:`MCPServerConfig`.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +22,7 @@ import threading
 import time
 from concurrent.futures import Future, TimeoutError as FutureTimeout
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from mcp import Client, StdioServerParameters
 from mcp.client.streamable_http import streamable_http_client
@@ -90,6 +104,9 @@ class MCPManager:
         self._tools: List[MCPTool] = []
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._queue: Optional[asyncio.Queue] = None
+        # Created on the worker's own loop (an asyncio.Semaphore binds to
+        # the loop that first awaits it), so this stays empty until then.
+        self._semaphores: Dict[str, asyncio.Semaphore] = {}
         self._thread: Optional[threading.Thread] = None
         self._ready = threading.Event()
         self._connected = False
@@ -172,8 +189,15 @@ class MCPManager:
             tool_name=qualified_name,
             argument_keys=sorted(arguments.keys()),
         )
+        # The worker enforces the real deadlines (slot wait, then call);
+        # this caller-side timeout is only a backstop for a worker thread
+        # that died without completing the future, so it must be the sum of
+        # both plus slack. Setting it to `call_timeout` alone -- as the
+        # first version did -- reported a *false* timeout for any call that
+        # had merely been waiting its turn and had not yet been sent.
+        budget = config.slot_wait_timeout + config.call_timeout + 5.0
         try:
-            result = self._submit("call", payload, config.call_timeout + 1.0)
+            result = self._submit("call", payload, budget)
         except FutureTimeout as exc:
             log_event(
                 logger,
@@ -270,9 +294,73 @@ class MCPManager:
         )
         return future.result(timeout=timeout)
 
+    async def _run_call(
+        self, sessions: Dict[str, Any], payload: Any, future: Future
+    ) -> None:
+        """Execute one tool call, bounded by its server's slot and call limits."""
+
+        server_name, tool_name, arguments = payload
+        config = self._configs_by_name[server_name]
+        semaphore = self._semaphores[server_name]
+        waited = 0.0
+        queued_at = time.monotonic()
+        try:
+            await asyncio.wait_for(
+                semaphore.acquire(), timeout=config.slot_wait_timeout
+            )
+        except asyncio.TimeoutError:
+            future.set_exception(
+                MCPToolCallError(
+                    f"MCP tool {server_name}__{tool_name} waited "
+                    f"{config.slot_wait_timeout}s for a free slot on server "
+                    f"{server_name!r} (max_concurrent_calls="
+                    f"{config.max_concurrent_calls}) and was never sent."
+                )
+            )
+            return
+        except asyncio.CancelledError:
+            future.set_exception(
+                MCPToolCallError(f"MCP tool {server_name}__{tool_name} was cancelled.")
+            )
+            raise
+
+        waited = time.monotonic() - queued_at
+        try:
+            result = await asyncio.wait_for(
+                sessions[server_name].call_tool(
+                    tool_name,
+                    arguments,
+                    read_timeout_seconds=config.call_timeout,
+                ),
+                timeout=config.call_timeout,
+            )
+            future.set_result(result)
+        except asyncio.TimeoutError:
+            future.set_exception(
+                MCPToolCallError(
+                    f"MCP tool {server_name}__{tool_name} exceeded its "
+                    f"{config.call_timeout}s call timeout "
+                    f"(after {waited:.1f}s waiting for a slot)."
+                )
+            )
+        except asyncio.CancelledError:
+            future.set_exception(
+                MCPToolCallError(f"MCP tool {server_name}__{tool_name} was cancelled.")
+            )
+            raise
+        except Exception as exc:
+            future.set_exception(exc)
+        finally:
+            semaphore.release()
+
     async def _worker(self) -> None:
         stack = AsyncExitStack()
         sessions: Dict[str, Any] = {}
+        in_flight: Set[asyncio.Task] = set()
+        self._semaphores = {
+            config.name: asyncio.Semaphore(config.max_concurrent_calls)
+            for config in self.configs
+        }
         while True:
             kind, payload, future = await self._queue.get()
             if kind == "connect":
@@ -338,22 +426,22 @@ class MCPManager:
                         )
                     future.set_exception(error)
             elif kind == "call":
-                server_name, tool_name, arguments = payload
-                config = self._configs_by_name[server_name]
-                try:
-                    session = sessions[server_name]
-                    result = await asyncio.wait_for(
-                        session.call_tool(
-                            tool_name,
-                            arguments,
-                            read_timeout_seconds=config.call_timeout,
-                        ),
-                        timeout=config.call_timeout,
-                    )
-                    future.set_result(result)
-                except Exception as exc:
-                    future.set_exception(exc)
+                # Dispatched as its own task, not awaited here: awaiting it
+                # inline made this loop a global serialization point, so two
+                # Workers calling MCP tools at the same time took turns --
+                # and the second one's caller-side timeout ran while it was
+                # still queued, reporting a timeout for a call that had
+                # never been sent.
+                task = asyncio.create_task(
+                    self._run_call(sessions, payload, future)
+                )
+                in_flight.add(task)
+                task.add_done_callback(in_flight.discard)
             elif kind == "close":
+                for task in list(in_flight):
+                    task.cancel()
+                if in_flight:
+                    await asyncio.gather(*in_flight, return_exceptions=True)
                 try:
                     await stack.aclose()
                     future.set_result(None)

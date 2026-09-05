@@ -15,21 +15,24 @@ import json
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..compression import ContextCompressor
 from ..context import ContextProvider
 from ..errors import FatalToolError
+from ..jobs.models import SuspendRun
 from ..llm import BaseLLM, LLMResponse, ToolCall, estimate_tokens
 from ..memory import MemoryManager, RunCompletedEvent
 from ..observability import bind_log_context, get_logger, log_event, run_log_file
+from ..retry import TransientLLMError
 from ..safety import ToolOutputGuard
 from ..state.context import ExecutionContext, Step
 from ..state.memory import LongTermMemory, ShortTermMemory
 from ..tools import ToolRegistry
 from .dispatch import ToolDispatcher, is_failure_observation
 from .graph import StateGraph
+from .tool_router import ToolSelector, filtered_schemas
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful ReAct agent. Reason step by step. Use the provided tools "
@@ -62,9 +65,22 @@ FORCED_REFLECTION_PROMPT = (
 logger = get_logger(__name__)
 
 
+#: ``stop_reason`` for a run that stopped because it is waiting on
+#: long-running jobs. Distinct from every other stop reason in that it is
+#: not a failure and not an ending: the run is expected to continue, via
+#: ``ReActLoop.run(resume_from=result.checkpoint)``.
+SUSPENDED_STOP_REASON = "suspended_on_jobs"
+
+
 @dataclass
 class AgentResult:
-    """The outcome of an agent run."""
+    """The outcome of an agent run.
+
+    ``checkpoint``/``pending_job_ids`` are populated only when
+    ``stop_reason`` is :data:`SUSPENDED_STOP_REASON`; for every other
+    outcome they stay ``None``/empty, so nothing that does not use jobs
+    pays any attention to them.
+    """
 
     answer: str
     success: bool
@@ -72,6 +88,12 @@ class AgentResult:
     tokens: int
     stop_reason: str
     trajectory: List[Dict[str, Any]]
+    checkpoint: Optional[Dict[str, Any]] = None
+    pending_job_ids: List[str] = field(default_factory=list)
+
+    @property
+    def suspended(self) -> bool:
+        return self.stop_reason == SUSPENDED_STOP_REASON
 
 
 class ReActLoop:
@@ -103,6 +125,7 @@ class ReActLoop:
         memory_namespace: str = "default",
         memory_subject_id: str = "anonymous",
         context_providers: Optional[Sequence[ContextProvider]] = None,
+        tool_selector: Optional[ToolSelector] = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -122,6 +145,10 @@ class ReActLoop:
         self.memory_namespace = memory_namespace
         self.memory_subject_id = memory_subject_id
         self.context_providers = list(context_providers or [])
+        # None keeps every tool's schema in every prompt -- the behaviour
+        # before tool routing existed, and still the right one for a
+        # handful of tools. See agent/trigger/tool_router.py.
+        self.tool_selector = tool_selector
         self._dispatcher = ToolDispatcher(
             tools,
             max_retries=max_tool_retries,
@@ -166,17 +193,34 @@ class ReActLoop:
         self,
         task: str,
         cancellation_event: Optional[threading.Event] = None,
+        resume_from: Optional[Dict[str, Any]] = None,
     ) -> AgentResult:
-        """Run the agent to completion on ``task`` and return an :class:`AgentResult`."""
-        ctx = ExecutionContext(max_steps=self.max_steps, max_tokens=self.max_tokens)
-        ctx.add_message("system", self.system_prompt)
-        for provider in self.context_providers:
-            for message in provider.prepare(task):
-                role = str(message.get("role", "system"))
-                content = str(message.get("content", ""))
-                if content:
-                    ctx.add_message(role, content)
-        ctx.add_message("user", task)
+        """Run the agent to completion on ``task`` and return an :class:`AgentResult`.
+
+        Args:
+            task: The task text. Ignored when ``resume_from`` is given --
+                a resumed run continues the transcript it already has.
+            cancellation_event: Checked at step boundaries and around each
+                tool call.
+            resume_from: A checkpoint from a previously suspended run (see
+                :attr:`AgentResult.checkpoint`). The transcript, trajectory
+                and consumed budget are restored, and the context providers
+                are **not** re-run: they prepared this conversation once
+                already, and replaying them would inject a second copy of
+                the same retrieved evidence.
+        """
+        if resume_from is not None:
+            ctx = ExecutionContext.restore(resume_from)
+        else:
+            ctx = ExecutionContext(max_steps=self.max_steps, max_tokens=self.max_tokens)
+            ctx.add_message("system", self.system_prompt)
+            for provider in self.context_providers:
+                for message in provider.prepare(task):
+                    role = str(message.get("role", "system"))
+                    content = str(message.get("content", ""))
+                    if content:
+                        ctx.add_message(role, content)
+            ctx.add_message("user", task)
 
         started = time.perf_counter()
         with bind_log_context(run_id=ctx.run_id, agent_name=self.agent_name), run_log_file(
@@ -208,6 +252,7 @@ class ReActLoop:
                     if stop_reason == "finished":
                         stop_reason = "no_answer"
 
+                suspended = stop_reason == SUSPENDED_STOP_REASON
                 result = AgentResult(
                     answer=answer,
                     success=stop_reason in ("finished",),
@@ -215,8 +260,14 @@ class ReActLoop:
                     tokens=ctx.tokens_used,
                     stop_reason=stop_reason,
                     trajectory=ctx.trajectory(),
+                    checkpoint=ctx.checkpoint() if suspended else None,
+                    pending_job_ids=list(state.get("__pending_job_ids__", [])),
                 )
-                self._record_memory_event(task, result, ctx)
+                if not suspended:
+                    # A suspended run has not completed, so it has nothing
+                    # to offer durable memory yet -- writing now would
+                    # record a half-finished conclusion as a fact.
+                    self._record_memory_event(task, result, ctx)
                 log_event(
                     logger,
                     logging.INFO,
@@ -319,6 +370,28 @@ class ReActLoop:
                 ctx.state.get("tokens_saved_by_compression", 0) + saved
             )
 
+        offered = None if reflect else self._offered_schemas(ctx)
+
+        # The token budget is checked again here, against the prompt this
+        # call is about to send. ``over_budget()`` above only sees tokens
+        # already *spent*, so a run one token under its ceiling could still
+        # issue a call with a 40k-token prompt: max_tokens=1 with a
+        # 101-token call finished successfully, reporting tokens=101.
+        # Counting the prompt first turns an unbounded overshoot into one
+        # bounded by the model's max output. It cannot be made exact --
+        # nothing knows the completion size before the call -- so this stays
+        # a ceiling with a known overshoot, not a hard cap. See BUGS.md #21.
+        projected = ctx.tokens_used + _prompt_tokens(managed, offered)
+        if projected >= self.max_tokens:
+            ctx.steps.pop()
+            state["__next__"] = "finish"
+            state["__answer__"] = None
+            state["__stop_reason__"] = (
+                f"budget: max_tokens ({self.max_tokens}) would be exceeded by "
+                f"this call (projected {projected})"
+            )
+            return state
+
         llm_started = time.perf_counter()
         log_event(
             logger,
@@ -326,13 +399,36 @@ class ReActLoop:
             "llm.call.started",
             step=step.index,
             message_count=len(managed),
-            tool_count=0 if reflect else len(self.tools),
+            tool_count=0 if offered is None else len(offered),
+            registry_size=len(self.tools),
             forced_reflection=reflect,
         )
         try:
-            response = self.llm.chat(
-                managed, tools=None if reflect else self.tools.schemas()
+            response = self.llm.chat(managed, tools=offered)
+        except TransientLLMError as exc:
+            # The provider was unreachable/overloaded and
+            # agent.retry.call_with_retry already spent its attempt budget.
+            # Ending the run here rather than re-raising keeps the work done
+            # so far -- the trajectory, the tool observations already
+            # collected, the token accounting -- which an exception
+            # propagating out of run() would discard entirely. The caller
+            # still sees failure via stop_reason; it just also gets the
+            # partial result. A PermanentLLMError deliberately keeps
+            # propagating: a request the provider rejects outright is a bug
+            # to fix (see BUGS.md #1), not a condition to degrade around.
+            log_event(
+                logger,
+                logging.ERROR,
+                "llm.call.unavailable",
+                step=step.index,
+                elapsed_ms=round((time.perf_counter() - llm_started) * 1000, 2),
+                exc_info=True,
             )
+            step.error = str(exc)
+            state["__next__"] = "finish"
+            state["__answer__"] = None
+            state["__stop_reason__"] = "llm_unavailable"
+            return state
         except Exception:
             log_event(
                 logger,
@@ -415,13 +511,48 @@ class ReActLoop:
             ],
         )
 
-        observations: List[str] = []
+        cancellation_event = state.get("__cancellation_event__")
+        failed: List[str] = []
         for tc in tool_calls:
+            # Checked here as well as at the top of _think_node: a run
+            # cancelled while a long tool call is in flight would otherwise
+            # go on to dispatch every *remaining* call in the same step
+            # before the loop next looked at the event.
+            if cancellation_event is not None and cancellation_event.is_set():
+                state["__next__"] = "finish"
+                state["__answer__"] = None
+                state["__stop_reason__"] = "cancelled"
+                return state
             try:
                 observation = self._dispatcher.dispatch(ctx, tc.name, tc.arguments)
+            except SuspendRun as signal:
+                # Not a failure: the run is waiting on work that is
+                # deliberately not on this call stack. Record what has been
+                # observed so far and hand the caller a resumable
+                # checkpoint -- see agent/jobs/.
+                if step.action is None:
+                    step.action = {"name": tc.name, "arguments": tc.arguments}
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "agent.run.suspended",
+                    pending_job_ids=signal.job_ids,
+                    step=step.index,
+                )
+                state["__pending_job_ids__"] = signal.job_ids
+                state["__answer__"] = None
+                state["__stop_reason__"] = SUSPENDED_STOP_REASON
+                state["__next__"] = "finish"
+                return state
             except FatalToolError as exc:
                 message = str(exc)
-                step.action = {"name": tc.name, "arguments": tc.arguments}
+                step.record_tool_call(
+                    id=tc.id,
+                    name=tc.name,
+                    arguments=tc.arguments,
+                    observation=None,
+                    ok=False,
+                )
                 step.error = message
                 step.observation = None
                 state["__answer__"] = f"Fatal tool error: {message}"
@@ -435,29 +566,49 @@ class ReActLoop:
                     ctx.state["injection_flags"] = (
                         ctx.state.get("injection_flags", 0) + len(scan.matches)
                     )
-            observations.append(observation)
+            ok = not is_failure_observation(observation)
+            if not ok:
+                failed.append(tc.name)
+            # Recorded per call, not per step: a turn that issues several
+            # calls used to collapse into the first one's name plus every
+            # observation concatenated. See Step's docstring and BUGS.md #16.
+            step.record_tool_call(
+                id=tc.id,
+                name=tc.name,
+                arguments=tc.arguments,
+                observation=observation,
+                ok=ok,
+            )
             ctx.add_message("tool", observation, tool_call_id=tc.id, name=tc.name)
 
-        step.action = {
-            "name": tool_calls[0].name,
-            "arguments": tool_calls[0].arguments,
-        }
-        step.observation = "\n".join(observations)
-
-        if any(is_failure_observation(obs) for obs in observations):
+        if failed:
             # Force the *next* think call to run with no tools offered (see
             # REFLECT_AFTER_FAILURE_STATE_KEY) instead of letting the model
             # go straight from a failed call to another tool call.
             ctx.add_message("user", FORCED_REFLECTION_PROMPT)
             ctx.state[REFLECT_AFTER_FAILURE_STATE_KEY] = True
             log_event(
-                logger, logging.INFO, "reflection.forced", tool_name=tool_calls[0].name
+                logger,
+                logging.INFO,
+                "reflection.forced",
+                tool_name=failed[0],
+                failed_tools=failed,
             )
 
         state["__next__"] = "think"
         return state
 
     # -- helpers ------------------------------------------------------------
+    def _offered_schemas(self, ctx: ExecutionContext) -> List[Dict[str, Any]]:
+        """The tool schemas this think step gets to see."""
+
+        if self.tool_selector is None:
+            return self.tools.schemas()
+        selection = self.tool_selector.select(
+            self.tools, _selection_query(ctx), used=_tools_used(ctx)
+        )
+        return filtered_schemas(self.tools, selection)
+
     def _near_budget(self, messages: List[Dict[str, Any]]) -> bool:
         prompt_tokens = sum(
             estimate_tokens(str(m.get("content") or "")) for m in messages
@@ -479,6 +630,66 @@ class ReActLoop:
 
 
 # -- module-level helpers --------------------------------------------------
+#: How many recent steps feed the tool-selection query. Small on purpose:
+#: the whole transcript would drown the actual task in tool output, and the
+#: task itself is the strongest signal for which tools are relevant.
+_SELECTION_TRAJECTORY_WINDOW = 3
+
+
+def _prompt_tokens(
+    messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]]
+) -> int:
+    """Estimated input size of one call: the transcript plus the tool schemas.
+
+    The schemas are not free -- a 56-tool registry is thousands of tokens of
+    prompt on every step -- so a budget check that ignores them
+    systematically under-counts exactly the runs most at risk of blowing it.
+    """
+
+    total = sum(estimate_tokens(str(m.get("content") or "")) for m in messages)
+    if tools:
+        total += sum(estimate_tokens(json.dumps(schema)) for schema in tools)
+    return total
+
+
+def _selection_query(ctx: ExecutionContext) -> str:
+    """Text the tool selector matches against: the task plus recent progress.
+
+    The task alone is not enough for a chain whose later steps need a tool
+    the original question never mentions (fetch a page, *then* summarize
+    it), so the last few thoughts and observations are appended.
+    """
+
+    parts: List[str] = []
+    for message in ctx.messages:
+        if message.get("role") == "user":
+            parts.append(str(message.get("content") or ""))
+            break
+    for step in ctx.steps[-_SELECTION_TRAJECTORY_WINDOW:]:
+        if step.thought:
+            parts.append(step.thought)
+        if step.observation and step.observation not in ("final_answer", "reflection"):
+            parts.append(step.observation[:500])
+    return "\n".join(part for part in parts if part)
+
+
+def _tools_used(ctx: ExecutionContext) -> List[str]:
+    """Tool names already called in this run; never hidden from later steps.
+
+    Reads every recorded call, not just the step's flattened ``action``:
+    the second tool of a parallel turn is exactly the kind the selector
+    would otherwise be free to hide from the next step.
+    """
+
+    names: List[str] = []
+    for step in ctx.steps:
+        for call in step.tool_calls:
+            name = call.get("name")
+            if name and name not in names:
+                names.append(str(name))
+    return names
+
+
 def _detect_loop(steps: List[Step], same_call_limit: int = 3) -> Optional[str]:
     """Return a reason if the trajectory is looping, else ``None``.
 

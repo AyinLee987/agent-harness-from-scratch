@@ -58,6 +58,143 @@ react_loop:
   # (tool, arguments) pair loop detection watches for. 0 disables the hint.
   source_failure_hint_threshold: 2
 
+models:
+  # Two tiers, so the short structured calls stop paying for the strong
+  # model. `provider: auto` (the default for both) keeps the historical
+  # environment chain -- DeepSeek if DEEPSEEK_API_KEY is set, else OpenAI if
+  # OPENAI_API_KEY and USE_OPENAI are, else MockLLM -- so nothing changes
+  # until a tier is explicitly configured. Leaving `fast` on auto makes it
+  # fall back to whatever `react` resolves to.
+  #
+  # provider: auto | mock | deepseek | bailian | openai_compatible
+  # `openai_compatible` is the general case (DeepSeek, Bailian, Ollama,
+  # vLLM and OpenAI all speak the same protocol) and takes the
+  # base_url / api_key_env / model triple:
+  #
+  #   fast:
+  #     provider: openai_compatible
+  #     model: qwen-flash
+  #     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  #     api_key_env: BAILIAN_API_KEY
+  #     temperature: 0.0
+  #
+  # The model the ReAct loop itself runs on -- Leader, Workers, every
+  # think step. A wrong token here compounds across every later step, so
+  # this is the tier that should stay strong.
+  react:
+    provider: auto
+  # Short, structured, cheaply-verified calls: intent routing and query
+  # rewriting, RAG query decomposition, the LLM reranker, conversation
+  # titles, and session-history summarization.
+  fast:
+    provider: auto
+
+router:
+  # Classify + rewrite the incoming question before the ReAct loop starts,
+  # so a chit-chat turn stops paying for a full agent run (and, when RAG is
+  # on, for a mandatory retrieval it has no use for). Off by default: it
+  # costs one extra fast-tier call per request.
+  enabled: false
+  # Route a `direct` verdict straight to a single tool-less model call
+  # instead of the ReAct loop. false keeps the classification (and its
+  # logging) while still running everything through the loop -- useful for
+  # measuring routing accuracy before letting it change behaviour.
+  act_on_direct: true
+  # Replace the user's text with the router's normalized rewrite before it
+  # reaches retrieval and the loop. Off by default: rewriting is the part
+  # most likely to lose information the user actually typed.
+  use_rewrite: false
+  # Steps a `direct` run is allowed. It should never need more than one
+  # model call; anything above 1 means the route was wrong.
+  direct_max_steps: 1
+
+tool_router:
+  # Offer the model only the tools its task actually matches, by running
+  # BM25 over the tool descriptions (agent/trigger/tool_router.py). Only
+  # worth turning on for a large registry -- with ENABLE_TOOL_SCALING_KIT=1
+  # the live agent carries up to 100 tools, whose schemas alone serialize
+  # to ~30k characters on every single call.
+  enabled: false
+  # Retrieved tools to offer, before pinned and already-used ones are added.
+  top_k: 8
+  # Registry size at or below which selection is skipped entirely --
+  # filtering a handful of tools saves nothing worth the risk of hiding
+  # the right one.
+  min_tools: 12
+  # Always offered regardless of score: no task text lexically matches
+  # "spawn_subagent", but hiding it silently removes the agent's ability
+  # to delegate at all.
+  pinned:
+    - spawn_subagent
+    - get_subagent_status
+    - wait_subagents
+    - cancel_subagent
+
+jobs:
+  # Long-running tools: a tool listed below returns a job_id immediately
+  # instead of blocking the ReAct loop (and, above it, the HTTP request)
+  # for its whole duration. The run suspends on await_jobs and is resumed
+  # through POST /api/runs/{run_id}/resume once the work lands.
+  # See agent/jobs/ for the design.
+  enabled: false
+  # Which tools to treat as long-running. A list rather than a per-tool
+  # flag because "long" is a property of the deployment, not the tool: the
+  # same fetch is milliseconds against a local mock and minutes against a
+  # slow site behind a rate limiter.
+  long_running: []
+  # Jobs allowed to execute at once.
+  max_parallel_jobs: 4
+  # Hard ceiling on any one job, whatever it reports.
+  max_duration_seconds: 3600.0
+  # Give up on a job that has stopped reporting progress. Applies only to
+  # tools that accept a `job_context` and call heartbeat() -- a tool that
+  # never reports would otherwise be killed for doing exactly what it was
+  # written to do, and is bounded by max_duration_seconds instead.
+  # "Running for 40 minutes" and "hasn't moved in 40 minutes" are different
+  # conditions and only the second is a reason to give up.
+  stall_timeout_seconds: 300.0
+  # Re-submitting the same (tool, arguments) inside this window returns the
+  # existing job instead of starting the same half-hour of work twice.
+  dedupe_ttl_seconds: 900.0
+  # How long await_jobs waits inline before suspending the run. Short on
+  # purpose: holding a request open is what this whole mechanism exists to
+  # avoid, so waiting is a convenience for jobs that happen to be quick.
+  await_seconds: 30.0
+
+retry:
+  # Per-attempt deadline handed to the provider SDK, replacing the openai
+  # SDK's own 600-second default. A hung provider must trip this long
+  # before a human gives up on the request -- max_steps/max_tokens count
+  # steps and tokens, so they can never catch a call that simply hangs.
+  timeout_seconds: 60.0
+  # Total attempts including the first. Only retryable failures (429, 5xx,
+  # connection/timeout) consume one; a 4xx rejection is raised immediately.
+  max_attempts: 3
+  # Exponential backoff between attempts, in seconds.
+  initial_backoff: 0.5
+  backoff_multiplier: 2.0
+  max_backoff: 8.0
+  # Fraction of each wait to randomize, so a fleet retrying after the same
+  # outage does not resynchronize into a thundering herd. 0 = deterministic.
+  jitter: 0.25
+  # Wall-clock ceiling across *all* attempts for one logical call. Without
+  # it the real worst case is max_attempts x timeout_seconds plus backoff.
+  # `null` disables the ceiling.
+  total_deadline_seconds: 180.0
+
+gateway:
+  # Admission control in front of every agent run (rate limit -> concurrency
+  # slot -> queue). false restores the pre-gateway behaviour of admitting
+  # every request immediately.
+  enabled: true
+  # Requests allowed per rate_window_seconds before callers get 429.
+  rate_limit: 100
+  rate_window_seconds: 1.0
+  # Agent runs allowed to execute at once; the rest queue.
+  max_concurrency: 8
+  # How long a request may wait for a slot before it is rejected with 503.
+  queue_timeout_seconds: 30.0
+
 session:
   # Most recent stored messages replayed verbatim on every turn.
   recent_window: 12

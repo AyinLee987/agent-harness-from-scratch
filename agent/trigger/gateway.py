@@ -23,13 +23,30 @@ from __future__ import annotations
 import time
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Iterator, Optional
 
 
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
+@dataclass
+class Admission:
+    """One request's accepted place in the gateway.
+
+    Yielded by :meth:`AgentGateway.admit` so a caller that does *not* return
+    an :class:`~agent.AgentResult` -- the server's Leader run returns a
+    ``MultiAgentRunResult``, which carries subagent results
+    :class:`GatewayResult` has no field for -- can still be admission-
+    controlled without having its result squeezed through a shape that
+    would drop half of it.
+    """
+
+    trace_id: str
+    queued_ms: float
+
+
 @dataclass
 class GatewayResult:
     """Normalized result from the gateway, wrapping the agent's output."""
@@ -131,14 +148,25 @@ class ConcurrencyGuard:
 # ---------------------------------------------------------------------------
 # Request queue
 # ---------------------------------------------------------------------------
-@dataclass
+@dataclass(eq=False)
 class _QueuedRequest:
+    """``eq=False`` so ``list.remove`` matches on identity: two requests that
+    happened to be enqueued in the same clock tick must not be confused."""
+
     trace_id: str
     enqueued_at: float
 
 
 class RequestQueue:
-    """FIFO request queue with timeout rejection.
+    """Tracks requests currently waiting for a concurrency slot.
+
+    Each :meth:`enqueue` must be paired with a :meth:`release` of *that*
+    handle, whichever way the wait ends. Popping "the oldest" instead is
+    what the first version did, and it was wrong twice over: an admitted
+    request was never removed at all (so :attr:`size` only ever grew, and
+    the list leaked one entry per request for the process's lifetime), and
+    the one path that did remove an entry removed a different request's.
+    Neither surfaced until the gateway was actually wired into the server.
 
     Args:
         queue_timeout: Maximum seconds a request can wait before being rejected.
@@ -156,12 +184,14 @@ class RequestQueue:
             self._queue.append(req)
         return req
 
-    def dequeue(self) -> _QueuedRequest | None:
-        """Pop the oldest request, or ``None`` if empty."""
+    def release(self, req: _QueuedRequest) -> None:
+        """Remove ``req`` -- the exact handle :meth:`enqueue` returned."""
         with self._lock:
-            if not self._queue:
-                return None
-            return self._queue.pop(0)
+            try:
+                self._queue.remove(req)
+            except ValueError:
+                # Already pruned by prune_expired(); nothing left to do.
+                pass
 
     def prune_expired(self) -> list[str]:
         """Remove and return trace_ids that have exceeded the timeout."""
@@ -218,9 +248,12 @@ class AgentGateway:
         rate_limit: int = 100,
         max_concurrency: int = 10,
         queue_timeout: float = 30.0,
+        rate_window_seconds: float = 1.0,
         trace_id_factory: Callable[[], str] | None = None,
     ) -> None:
-        self._rate_limiter = RateLimiter(max_requests=rate_limit)
+        self._rate_limiter = RateLimiter(
+            max_requests=rate_limit, window_seconds=rate_window_seconds
+        )
         self._concurrency_guard = ConcurrencyGuard(max_concurrency)
         self._queue = RequestQueue(queue_timeout=queue_timeout)
         self._trace_id_factory = trace_id_factory or (lambda: uuid.uuid4().hex[:12])
@@ -238,6 +271,56 @@ class AgentGateway:
     def queue(self) -> RequestQueue:
         return self._queue
 
+    # -- admission ----------------------------------------------------------
+    @contextmanager
+    def admit(self, trace_id: Optional[str] = None) -> Iterator[Admission]:
+        """Acquire a place to run, and hold it for the duration of the block.
+
+        This is the gateway's real primitive; :meth:`run` is a convenience
+        wrapper for the common "run a plain agent" case. Callers whose unit
+        of work isn't a bare ``agent.run(task)`` -- the server runs a Leader
+        through a :class:`~agent.MultiAgentOrchestrator` and gets back a
+        result type with subagent data on it -- use this directly and keep
+        their own result shape.
+
+        The wait for a concurrency slot is a **blocking** one, so this must
+        be entered from a worker thread, never from an event loop. That
+        trade-off is deliberate: it keeps the gateway a plain, dependency-
+        free synchronous component that a Redis-backed distributed
+        implementation could replace behind the same interface, at the cost
+        of a queued request occupying a thread while it waits.
+
+        Raises:
+            RateLimitExceeded: If the rate limit is hit.
+            QueueTimeout: If the request waits longer than ``queue_timeout``
+                for a concurrency slot.
+        """
+
+        trace_id = trace_id or self._trace_id_factory()
+
+        if not self._rate_limiter.acquire():
+            raise RateLimitExceeded(retry_after=self._rate_limiter.window_seconds)
+
+        queued = self._queue.enqueue(trace_id)
+        try:
+            if not self._concurrency_guard.acquire(
+                blocking=True, timeout=self._queue.queue_timeout
+            ):
+                raise QueueTimeout(f"Request {trace_id} timed out in queue")
+        finally:
+            # Paired with enqueue() on every exit path, including the
+            # timeout raise -- see RequestQueue's docstring for the leak
+            # this replaces.
+            self._queue.release(queued)
+
+        try:
+            yield Admission(
+                trace_id=trace_id,
+                queued_ms=(time.monotonic() - queued.enqueued_at) * 1000,
+            )
+        finally:
+            self._concurrency_guard.release()
+
     # -- synchronous entry --------------------------------------------------
     def run(self, agent: Any, task: str, *, max_steps: int | None = None) -> GatewayResult:
         """Run a task through the gateway synchronously.
@@ -253,27 +336,10 @@ class AgentGateway:
 
         Raises:
             RateLimitExceeded: If the rate limit is hit.
-            ConcurrencyLimitExceeded: If all concurrency slots are busy
-                and the request cannot be queued.
             QueueTimeout: If the request times out in the queue.
         """
-        trace_id = self._trace_id_factory()
         t0 = time.monotonic()
-
-        # 1. Rate limit check.
-        if not self._rate_limiter.acquire():
-            raise RateLimitExceeded()
-
-        # 2. Enqueue and wait for a concurrency slot.
-        queued = self._queue.enqueue(trace_id)
-        if not self._concurrency_guard.acquire(blocking=True, timeout=self._queue.queue_timeout):
-            self._queue.dequeue()  # best-effort cleanup
-            raise QueueTimeout(f"Request {trace_id} timed out in queue")
-
-        queued_ms = (time.monotonic() - queued.enqueued_at) * 1000
-
-        try:
-            # 3. Execute.
+        with self.admit() as admission:
             if max_steps is not None and hasattr(agent, "max_steps"):
                 saved = agent.max_steps
                 agent.max_steps = max_steps
@@ -284,8 +350,6 @@ class AgentGateway:
             else:
                 result = agent.run(task)
 
-            elapsed_ms = (time.monotonic() - t0) * 1000
-
             return GatewayResult(
                 answer=result.answer,
                 success=result.success,
@@ -293,12 +357,10 @@ class AgentGateway:
                 tokens=result.tokens,
                 stop_reason=result.stop_reason,
                 trajectory=result.trajectory,
-                trace_id=trace_id,
-                queued_ms=queued_ms,
-                elapsed_ms=elapsed_ms,
+                trace_id=admission.trace_id,
+                queued_ms=admission.queued_ms,
+                elapsed_ms=(time.monotonic() - t0) * 1000,
             )
-        finally:
-            self._concurrency_guard.release()
 
     # -- context manager ----------------------------------------------------
     def __enter__(self) -> "AgentGateway":

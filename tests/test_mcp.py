@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -123,6 +126,118 @@ def test_manager_discovers_and_calls_namespaced_tool():
     ]
     with pytest.raises(MCPManagerClosedError):
         manager.call("fetch", "fetch", {"url": "https://example.com"})
+
+
+class SlowClient(FakeClient):
+    """Every call takes ``delay`` seconds and records how many overlap."""
+
+    def __init__(self, remote_tools, delay=0.3):
+        super().__init__(remote_tools)
+        self.delay = delay
+        self.in_flight = 0
+        self.peak_in_flight = 0
+
+    async def call_tool(self, name, arguments, read_timeout_seconds=None):
+        self.in_flight += 1
+        self.peak_in_flight = max(self.peak_in_flight, self.in_flight)
+        try:
+            await asyncio.sleep(self.delay)
+            return types.CallToolResult(
+                content=[types.TextContent(text=f"called {name}: {arguments['url']}")]
+            )
+        finally:
+            self.in_flight -= 1
+
+
+def _call_from_threads(manager, count):
+    """Fire ``count`` concurrent manager.call()s and return (results, seconds)."""
+
+    results: list = [None] * count
+    errors: list = [None] * count
+
+    def worker(index):
+        try:
+            results[index] = manager.call(
+                "fetch", "fetch", {"url": f"https://example.com/{index}"}
+            )
+        except Exception as exc:  # recorded so the assert can show it
+            errors[index] = exc
+
+    started = time.monotonic()
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    elapsed = time.monotonic() - started
+
+    assert not any(errors), errors
+    return results, elapsed
+
+
+def test_concurrent_calls_overlap_instead_of_taking_turns():
+    """Regression guard: the worker loop used to ``await`` each call inline,
+    so N parallel Workers calling MCP tools were serialized behind one
+    another -- N x the latency, and the ones still queued burned their
+    caller-side timeout without ever having been sent."""
+
+    client = SlowClient([_fetch_descriptor()], delay=0.3)
+    config = MCPServerConfig.stdio(
+        name="fetch", command="uvx", max_concurrent_calls=4
+    )
+
+    with MCPManager([config], client_factory=lambda _: client) as manager:
+        results, elapsed = _call_from_threads(manager, 4)
+
+    assert len(results) == 4
+    assert all(result for result in results)
+    assert client.peak_in_flight == 4
+    # Serialized, four 0.3s calls would take >= 1.2s.
+    assert elapsed < 0.9, f"calls appear serialized ({elapsed:.2f}s)"
+
+
+def test_per_server_concurrency_is_bounded_by_max_concurrent_calls():
+    """Unbounded overlap is not the fix -- the cap is an explicit guardrail
+    the way max_steps/max_tokens are, so a Leader fanning out cannot flood
+    whatever is on the other end of the transport."""
+
+    client = SlowClient([_fetch_descriptor()], delay=0.2)
+    config = MCPServerConfig.stdio(
+        name="fetch", command="uvx", max_concurrent_calls=2
+    )
+
+    with MCPManager([config], client_factory=lambda _: client) as manager:
+        results, _ = _call_from_threads(manager, 6)
+
+    assert len(results) == 6
+    assert client.peak_in_flight == 2
+
+
+def test_a_call_that_never_gets_a_slot_says_so_rather_than_claiming_a_timeout():
+    """A call still waiting its turn has not timed out -- it was never sent.
+    Reporting the two cases identically is what made the original bug so
+    hard to read from logs alone."""
+
+    client = SlowClient([_fetch_descriptor()], delay=1.0)
+    config = MCPServerConfig.stdio(
+        name="fetch",
+        command="uvx",
+        max_concurrent_calls=1,
+        slot_wait_timeout=0.05,
+        call_timeout=5.0,
+    )
+
+    with MCPManager([config], client_factory=lambda _: client) as manager:
+        blocker = threading.Thread(
+            target=lambda: manager.call("fetch", "fetch", {"url": "https://a"})
+        )
+        blocker.start()
+        time.sleep(0.1)
+        try:
+            with pytest.raises(MCPToolCallError, match="free slot"):
+                manager.call("fetch", "fetch", {"url": "https://b"})
+        finally:
+            blocker.join(timeout=10)
 
 
 def test_uv_tool_command_uses_native_binary_beside_python(tmp_path):
